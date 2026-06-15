@@ -14,6 +14,11 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 import config
 
+try:
+    import polars as pl
+except ImportError:  # Optional acceleration dependency.
+    pl = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,8 +35,18 @@ def _save_cache(df: pd.DataFrame, path: str) -> None:
 def _load_cache(path: str) -> Optional[pd.DataFrame]:
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, index_col=0, parse_dates=True)
-    df.index = pd.to_datetime(df.index, utc=True)
+
+    if getattr(config, "USE_POLARS_IO", True) and pl is not None:
+        df_pl = pl.scan_csv(path, try_parse_dates=True).collect()
+        ts_col = df_pl.columns[0]
+        df = df_pl.to_pandas()
+        df[ts_col] = pd.to_datetime(df[ts_col], utc=True)
+        df = df.set_index(ts_col)
+    else:
+        df = pd.read_csv(path, index_col=0, parse_dates=True)
+        df.index = pd.to_datetime(df.index, utc=True)
+
+    df = df.sort_index(ascending=True)
     return df
 
 

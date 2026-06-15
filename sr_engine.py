@@ -43,15 +43,37 @@ class RangeEngine:
         self._p = lambda k, default=None: self.cfg.get(k, getattr(config, k, default))
         self.state = RangeState()
 
+        # Cache for numpy arrays
+        self._last_df = None
+        self._highs = None
+        self._lows = None
+        self._closes = None
+        self._opens = None
+        self._atrs = None
+        self._hours = None
+        self._times = None
+
     def update(self, i: int, df: pd.DataFrame, atr: pd.Series) -> None:
         """
         At each bar i, check if current range is still valid or needs rebuild.
         Runs on ALL bars (Asian, London, NY) — session filtering is for entries only.
         """
-        atr_val = float(atr.iloc[i]) if not pd.isna(atr.iloc[i]) else 1.0
+        if self._last_df is not df:
+            self._last_df = df
+            self._highs = df["high"].to_numpy(dtype=np.float64)
+            self._lows = df["low"].to_numpy(dtype=np.float64)
+            self._closes = df["close"].to_numpy(dtype=np.float64)
+            self._opens = df["open"].to_numpy(dtype=np.float64)
+            self._atrs = atr.to_numpy(dtype=np.float64)
+            self._hours = df.index.hour.to_numpy(dtype=np.int32)
+            self._times = df.index
+
+        atr_val = self._atrs[i]
+        if pd.isna(atr_val):
+            atr_val = 1.0
 
         if self.state.valid:
-            if self._is_range_broken(i, df, atr_val):
+            if self._is_range_broken(i, atr_val):
                 self.state = RangeState()
             else:
                 self.state.range_end_bar = i
@@ -60,11 +82,11 @@ class RangeEngine:
         if i < self._p("RANGE_MIN_BARS", 8):
             return
 
-        new_state = self._scan_for_range(i, df, atr)
+        new_state = self._scan_for_range(i)
         if new_state is not None:
             self.state = new_state
 
-    def _is_range_broken(self, i: int, df: pd.DataFrame, atr_val: float) -> bool:
+    def _is_range_broken(self, i: int, atr_val: float) -> bool:
         """
         Range expires when:
         - A candle CLOSES more than 1.2x ATR beyond either boundary
@@ -73,7 +95,7 @@ class RangeEngine:
         max_bars = self._p("RANGE_MAX_BARS", 150)
         if i - self.state.range_start_bar > max_bars:
             return True
-        close_i = df["close"].iloc[i]
+        close_i = self._closes[i]
         breakout_buffer = 1.2 * atr_val
         if close_i > self.state.range_high + breakout_buffer:
             return True
@@ -81,8 +103,7 @@ class RangeEngine:
             return True
         return False
 
-    def _scan_for_range(self, current_bar: int, df: pd.DataFrame,
-                        atr: pd.Series) -> Optional[RangeState]:
+    def _scan_for_range(self, current_bar: int) -> Optional[RangeState]:
         """
         Dense window scan — every 5 bars from RANGE_MIN_BARS to RANGE_MAX_BARS.
         Finds the highest-quality range ending at or near current_bar.
@@ -95,7 +116,9 @@ class RangeEngine:
         max_h_atr  = self._p("RANGE_MAX_HEIGHT_ATR", 5.0)
         min_quality = self._p("RANGE_MIN_QUALITY", 30)
 
-        atr_val = float(atr.iloc[current_bar]) if not pd.isna(atr.iloc[current_bar]) else 1.0
+        atr_val = self._atrs[current_bar]
+        if pd.isna(atr_val):
+            atr_val = 1.0
         touch_prox = proximity * atr_val
 
         best_state: Optional[RangeState] = None
@@ -113,9 +136,15 @@ class RangeEngine:
             if actual_window < min_bars:
                 continue
 
-            sub = df.iloc[start_bar: current_bar + 1]
-            rh = float(sub["high"].max())
-            rl = float(sub["low"].min())
+            # NumPy slices (fast view)
+            highs_slice = self._highs[start_bar: current_bar + 1]
+            lows_slice  = self._lows[start_bar: current_bar + 1]
+            closes_slice = self._closes[start_bar: current_bar + 1]
+            opens_slice  = self._opens[start_bar: current_bar + 1]
+            hours_slice  = self._hours[start_bar: current_bar + 1]
+
+            rh = float(np.max(highs_slice))
+            rl = float(np.min(lows_slice))
             height = rh - rl
 
             if atr_val <= 0:
@@ -125,14 +154,15 @@ class RangeEngine:
             if h_atr < min_h_atr or h_atr > max_h_atr:
                 continue
 
-            high_touches = self._count_touches(sub, rh, touch_prox, "high")
-            low_touches  = self._count_touches(sub, rl, touch_prox, "low")
+            high_touches = int(np.sum(np.abs(highs_slice - rh) <= touch_prox))
+            low_touches  = int(np.sum(np.abs(lows_slice - rl) <= touch_prox))
 
             if high_touches < min_touches or low_touches < min_touches:
                 continue
 
-            score, is_premium, asian_flag = self._score_range(
-                sub, rh, rl, h_atr, high_touches, low_touches, touch_prox
+            score, is_premium, asian_flag = self._score_range_np(
+                rh, rl, h_atr, high_touches, low_touches, touch_prox,
+                highs_slice, lows_slice, closes_slice, opens_slice, hours_slice
             )
 
             if score < min_quality:
@@ -156,19 +186,9 @@ class RangeEngine:
 
         return best_state
 
-    def _count_touches(self, window_df: pd.DataFrame, level: float,
-                       proximity: float, side: str) -> int:
-        """
-        Count how many bars came within `proximity` of `level`.
-        side='high' → use bar highs, side='low' → use bar lows.
-        At least 1 is always true (the bar that IS the max/min).
-        """
-        col = "high" if side == "high" else "low"
-        prices = window_df[col].values
-        return int(np.sum(np.abs(prices - level) <= proximity))
-
-    def _score_range(self, window_df, rh, rl, h_atr,
-                     high_touches, low_touches, touch_prox) -> tuple:
+    def _score_range_np(self, rh, rl, h_atr,
+                        high_touches, low_touches, touch_prox,
+                        highs_slice, lows_slice, closes_slice, opens_slice, hours_slice) -> tuple:
         """
         Score 0–100. Returns (score, is_premium, formed_in_asian).
         """
@@ -185,26 +205,27 @@ class RangeEngine:
             score += 10  # partial credit for near-sweet-spot ranges
 
         # +15: Asian / off-hours formation
-        asian_flag = self._is_asian_or_offhours(window_df)
+        asian_flag = self._is_asian_or_offhours_np(hours_slice)
         if asian_flag:
             score += 15
 
         # +10: long compression (>= 15 bars)
-        if len(window_df) >= 15:
+        n = len(highs_slice)
+        if n >= 15:
             score += 10
 
         # +10: contraction (later bars tighter than earlier)
-        if self._has_contraction(window_df):
+        if self._has_contraction_np(closes_slice, opens_slice):
             score += 10
 
         # +15: clean touches (wicks don't pierce much through boundary)
-        if self._has_clean_touches(window_df, rh, rl, touch_prox):
+        if self._has_clean_touches_np(highs_slice, lows_slice, rh, rl, touch_prox):
             score += 15
 
         is_premium = score >= self._p("RANGE_PREMIUM_THRESHOLD", 75)
         return float(score), is_premium, asian_flag
 
-    def _is_asian_or_offhours(self, window_df: pd.DataFrame) -> bool:
+    def _is_asian_or_offhours_np(self, hours_slice: np.ndarray) -> bool:
         try:
             asian_open  = int(self._p("ASIAN_SESSION_OPEN",  "00:00").split(":")[0])
             asian_close = int(self._p("ASIAN_SESSION_CLOSE", "07:00").split(":")[0])
@@ -212,39 +233,28 @@ class RangeEngine:
         except Exception:
             return False
 
-        count_in = 0
-        for ts in window_df.index:
-            h = ts.hour
-            if asian_open <= h < asian_close or h >= off_hours:
-                count_in += 1
-        return count_in > len(window_df) * 0.4  # 40% threshold (was 50%)
+        count_in = np.sum((hours_slice >= asian_open) & (hours_slice < asian_close) | (hours_slice >= off_hours))
+        return count_in > len(hours_slice) * 0.4  # 40% threshold (was 50%)
 
-    def _has_contraction(self, window_df: pd.DataFrame) -> bool:
-        n = len(window_df)
+    def _has_contraction_np(self, closes_slice: np.ndarray, opens_slice: np.ndarray) -> bool:
+        n = len(closes_slice)
         if n < 6:
             return False
-        bodies = (window_df["close"] - window_df["open"]).abs()
-        first_half  = bodies.iloc[:n // 2].mean()
-        second_half = bodies.iloc[n // 2:].mean()
+        bodies = np.abs(closes_slice - opens_slice)
+        half = n // 2
+        first_half  = np.mean(bodies[:half])
+        second_half = np.mean(bodies[half:])
         if first_half == 0:
             return False
         return second_half < first_half * 0.85  # 15% smaller (was 20%)
 
-    def _has_clean_touches(self, window_df: pd.DataFrame, rh: float, rl: float,
-                           touch_prox: float) -> bool:
-        clean_count = 0
-        total_touches = 0
-        for _, row in window_df.iterrows():
-            near_high = abs(row["high"] - rh) <= touch_prox
-            near_low  = abs(row["low"]  - rl) <= touch_prox
-            if near_high:
-                total_touches += 1
-                if (row["high"] - rh) < touch_prox * 0.6:
-                    clean_count += 1
-            if near_low:
-                total_touches += 1
-                if (rl - row["low"]) < touch_prox * 0.6:
-                    clean_count += 1
+    def _has_clean_touches_np(self, highs_slice: np.ndarray, lows_slice: np.ndarray,
+                              rh: float, rl: float, touch_prox: float) -> bool:
+        near_high = np.abs(highs_slice - rh) <= touch_prox
+        near_low  = np.abs(lows_slice - rl) <= touch_prox
+        total_touches = np.sum(near_high) + np.sum(near_low)
         if total_touches == 0:
-            return True  # no touch data = default pass
-        return (clean_count / total_touches) >= 0.5  # was 0.6
+            return True
+        clean_high = np.sum((highs_slice[near_high] - rh) < touch_prox * 0.6)
+        clean_low  = np.sum((rl - lows_slice[near_low]) < touch_prox * 0.6)
+        return (clean_high + clean_low) / total_touches >= 0.5

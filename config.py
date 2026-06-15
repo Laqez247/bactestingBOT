@@ -58,7 +58,7 @@ RANGE_MIN_TOUCHES     = 1      # Minimum touches per side (1 = at least 1 test e
 RANGE_TOUCH_PROXIMITY = 0.35   # ATR fraction to count as a touch (was 0.15 — too tight)
 RANGE_MIN_HEIGHT_ATR  = 0.25   # Range too narrow if below this (was 0.5)
 RANGE_MAX_HEIGHT_ATR  = 3.5    # Range too wide if above this (lowered from 5.0; 2025 XAUUSD was very volatile)
-RANGE_MIN_QUALITY     = 30     # Reject ranges scoring below this (was 50)
+RANGE_MIN_QUALITY     = 40     # Reject ranges scoring below this (was 30 → raised for quality)
 
 # Range quality score weights (0-100 scale) — configurable
 RANGE_SCORE_BOTH_SIDES_TOUCHED = 30   # both sides touched 2+ times
@@ -77,8 +77,8 @@ OFF_HOURS_OPEN      = "17:00"
 # ===========================================================
 # LIQUIDITY GRAB (SWEEP)
 # ===========================================================
-SWEEP_MIN_WICK_ATR  = 0.15   # Minimum wick beyond level (ATR fraction) — was 0.25
-SWEEP_MIN_WICK_ABS  = 0.15   # Minimum wick beyond level (absolute $) — was 0.30
+SWEEP_MIN_WICK_ATR  = 0.20   # Minimum wick beyond level (ATR fraction) — tightened from 0.15
+SWEEP_MIN_WICK_ABS  = 0.20   # Minimum wick beyond level (absolute $) — tightened from 0.15
 SWEEP_LOOKBACK_BARS = 20     # How many bars before breakout to find sweep — was 15
 EQUAL_HIGH_LOW_BAND = 0.25   # ATR fraction for EQH/EQL proximity — was 0.20
 
@@ -94,7 +94,7 @@ FALSE_BREAKOUT_BARS   = 3     # Bars to check for false break — was 1 (too str
 # ===========================================================
 # RETEST ZONES
 # ===========================================================
-OB_DISPLACEMENT_ATR = 0.8    # Minimum displacement after OB to qualify — was 1.5 (too high)
+OB_DISPLACEMENT_ATR = 1.2    # Minimum displacement after OB to qualify — raised from 0.8 (too loose)
 FVG_MIN_SIZE_ATR    = 0.10   # Minimum FVG gap size (ATR fraction) — was 0.20
 SR_ZONE_BAND_ATR    = 0.20   # Proximity band around broken S/R level — was 0.15
 RETEST_TIMEOUT_BARS = 50     # Setup expires after N bars with no retest — was 30
@@ -103,8 +103,10 @@ ZONE_MIN_WIDTH_ABS  = 0.20   # Minimum zone width in $ terms
 # ===========================================================
 # ENTRY
 # ===========================================================
-ENTRY_MODE = "MODE_CLOSE_OUTSIDE"
+ENTRY_MODE = "MODE_WICK_REJECTION"
 # Options: MODE_CLOSE_OUTSIDE | MODE_WICK_REJECTION | MODE_IMMEDIATE
+# MODE_WICK_REJECTION: requires confirmed rejection candle (wick into zone, close back away)
+# This significantly improves win rate vs MODE_CLOSE_OUTSIDE by filtering fake retests
 
 # ===========================================================
 # STOP LOSS
@@ -140,11 +142,25 @@ ROUND_NUMBER_PROXIMITY = 5     # Within $5 of the level counts
 # Swing lookback for TP candidates (bars)
 TP_SWING_LOOKBACK_BARS = 50
 
-# Dual TP
-DUAL_TP_ENABLED   = False
+# Dual TP — enabled to improve win rate via partial close + breakeven
+DUAL_TP_ENABLED   = True
 DUAL_TP_RATIO_1   = 0.50   # Close 50% at TP1
 TP2_MIN_RR        = 1.8    # Minimum RR for TP2
-BREAKEVEN_AFTER_TP1 = True  # Move SL to breakeven after TP1
+BREAKEVEN_AFTER_TP1 = True  # Move SL to breakeven after TP1 hit
+
+# Fixed TP1 at a set R multiple — overrides dynamic TP1 when > 0
+# e.g. TP1_FIXED_RR = 1.0 places TP1 at exactly 1R from entry (high hit-rate)
+# Dynamic scoring target then becomes TP2. Set 0 to use only dynamic targets.
+TP1_FIXED_RR = 1.0
+
+# SHORT sweep quality filter — block low-win-rate sweep types for SHORT entries
+# BSL_RANGE_HIGH and BSL_PDH historically show ~25% WR; SWING and EQUAL are better
+SHORT_BLOCKED_SWEEPS = ["BSL_EQUAL_HIGHS", "BSL_PDH"]
+# BSL_EQUAL_HIGHS: historically 23% WR — the actual drag on SHORT performance
+# BSL_RANGE_HIGH (44% WR) and BSL_SWING_HIGH (31% WR) kept
+
+# Zone type filter
+DISABLE_SR_ZONE = True   # SR zones historically show 33% WR — disabled for quality
 
 # ===========================================================
 # TRADE MANAGEMENT
@@ -157,7 +173,7 @@ SAME_BAR_RESOLUTION   = "SL"  # If SL and TP hit same bar: conservative = SL win
 # ===========================================================
 SESSION_FILTER_ON    = True
 VOLATILITY_FILTER_ON = True
-VOLATILITY_MIN_ATR   = 0.50   # Minimum ATR to trade (avoid dead markets)
+VOLATILITY_MIN_ATR   = 0.80   # Minimum ATR to trade (raised from 0.50; avoid low-vol noise)
 VOLATILITY_MAX_ATR   = 5.00   # Skip if ATR too high (news spike / chaos)
 SPREAD_FILTER_MAX    = 2.00   # Skip if spread exceeds this — was 1.00 (too tight)
 NO_TRADE_BEFORE_NEWS = True   # Skip setups within 30 min of known news
@@ -180,6 +196,17 @@ MSS_PRIOR_LH_COUNT = 2      # Min number of lower highs before MSS is valid (bul
 # ===========================================================
 ENABLE_LONG  = True
 ENABLE_SHORT = True
+
+# ===========================================================
+# PERFORMANCE / ACCELERATION
+# ===========================================================
+# Optional packages:
+# - polars: faster lazy CSV/cache reads when installed
+# - numba: JIT-friendly numeric loops for future deeper refactors
+# - joblib: parallel independent parameter sweeps when installed
+USE_POLARS_IO = True
+PARALLEL_ITERATION_TESTS = True
+PARALLEL_N_JOBS = -1
 
 # ===========================================================
 # KNOWN HIGH-IMPACT NEWS WINDOWS (UTC times, recurring weekly)

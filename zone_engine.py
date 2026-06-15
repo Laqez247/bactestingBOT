@@ -66,9 +66,11 @@ class ZoneEngine:
             self.zones.append(bb)
 
         # 4. Broken S/R (range boundary now acting as support/resistance)
-        sr = self._find_sr(breakout, range_state, atr_val)
-        if sr:
-            self.zones.append(sr)
+        # Disabled when DISABLE_SR_ZONE=True (historically low win rate ~33%)
+        if not self._p("DISABLE_SR_ZONE", False):
+            sr = self._find_sr(breakout, range_state, atr_val)
+            if sr:
+                self.zones.append(sr)
 
         # Sort by priority, then apply minimum width
         self.zones = [self._enforce_min_width(z, atr_val) for z in self.zones]

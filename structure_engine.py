@@ -9,6 +9,52 @@ import pandas as pd
 from typing import Optional
 import config
 
+try:
+    from numba import njit
+except ImportError:  # Optional acceleration dependency.
+    njit = None
+
+
+def _identity_jit(func=None, **_kwargs):
+    if func is None:
+        return lambda f: f
+    return func
+
+
+_jit = njit(cache=True) if njit is not None else _identity_jit
+
+
+@_jit
+def _compute_atr_values(high, low, close, period):
+    n = len(close)
+    atr = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        atr[i] = np.nan
+
+    if n == 0:
+        return atr
+
+    alpha = 2.0 / (period + 1.0)
+    prev_atr = 0.0
+    for i in range(n):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+            hl = high[i] - low[i]
+            hc = abs(high[i] - close[i - 1])
+            lc = abs(low[i] - close[i - 1])
+            tr = max(hl, hc, lc)
+
+        if i == 0:
+            prev_atr = tr
+        else:
+            prev_atr = (alpha * tr) + ((1.0 - alpha) * prev_atr)
+
+        if i >= period - 1:
+            atr[i] = prev_atr
+
+    return atr
+
 
 def compute_atr(df: pd.DataFrame, period: int = None) -> pd.Series:
     """
@@ -17,17 +63,11 @@ def compute_atr(df: pd.DataFrame, period: int = None) -> pd.Series:
     """
     if period is None:
         period = config.ATR_PERIOD
-    high  = df["high"]
-    low   = df["low"]
-    close = df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low  - prev_close).abs()
-    ], axis=1).max(axis=1)
-    atr = tr.ewm(span=period, min_periods=period, adjust=False).mean()
-    return atr
+    high = df["high"].to_numpy(dtype=np.float64, copy=False)
+    low = df["low"].to_numpy(dtype=np.float64, copy=False)
+    close = df["close"].to_numpy(dtype=np.float64, copy=False)
+    atr = _compute_atr_values(high, low, close, int(period))
+    return pd.Series(atr, index=df.index, name="atr")
 
 
 class StructureEngine:
@@ -71,6 +111,21 @@ class StructureEngine:
         self._last_sh_checked = -1
         self._last_sl_checked = -1
 
+        # Cached numpy views for the active DataFrame.
+        self._df_id = None
+        self._high = None
+        self._low = None
+        self._close = None
+
+    def _bind_df(self, df: pd.DataFrame) -> None:
+        df_id = id(df)
+        if df_id == self._df_id:
+            return
+        self._df_id = df_id
+        self._high = df["high"].to_numpy(dtype=np.float64, copy=False)
+        self._low = df["low"].to_numpy(dtype=np.float64, copy=False)
+        self._close = df["close"].to_numpy(dtype=np.float64, copy=False)
+
     def reset_flags(self):
         """Call after a setup is consumed (opened or rejected)."""
         self.mss_bullish = False
@@ -84,6 +139,8 @@ class StructureEngine:
         A pivot at bar T is only confirmed when bar T+PIVOT_RIGHT has closed,
         i.e., when i >= T + PIVOT_RIGHT.
         """
+        self._bind_df(df)
+
         # The candidate pivot bar is i - PIVOT_RIGHT
         candidate = i - self.pivot_right
         if candidate < self.pivot_left:
@@ -104,17 +161,18 @@ class StructureEngine:
             return
         self._last_sh_checked = cand
 
-        cand_high = df["high"].iloc[cand]
+        high = self._high
+        cand_high = high[cand]
         left_start = max(0, cand - self.pivot_left)
 
         # Left side: all bars < cand_high
-        left_ok = all(df["high"].iloc[j] < cand_high for j in range(left_start, cand))
+        left_ok = bool(np.all(high[left_start:cand] < cand_high))
         if not left_ok:
             return
 
         # Right side: bars cand+1 .. cand+pivot_right (all within df)
-        right_end = min(len(df), cand + self.pivot_right + 1)
-        right_ok = all(df["high"].iloc[j] < cand_high for j in range(cand + 1, right_end))
+        right_end = min(len(high), cand + self.pivot_right + 1)
+        right_ok = bool(np.all(high[cand + 1:right_end] < cand_high))
         if not right_ok:
             return
 
@@ -129,15 +187,16 @@ class StructureEngine:
             return
         self._last_sl_checked = cand
 
-        cand_low = df["low"].iloc[cand]
+        low = self._low
+        cand_low = low[cand]
         left_start = max(0, cand - self.pivot_left)
 
-        left_ok = all(df["low"].iloc[j] > cand_low for j in range(left_start, cand))
+        left_ok = bool(np.all(low[left_start:cand] > cand_low))
         if not left_ok:
             return
 
-        right_end = min(len(df), cand + self.pivot_right + 1)
-        right_ok = all(df["low"].iloc[j] > cand_low for j in range(cand + 1, right_end))
+        right_end = min(len(low), cand + self.pivot_right + 1)
+        right_ok = bool(np.all(low[cand + 1:right_end] > cand_low))
         if not right_ok:
             return
 
@@ -182,9 +241,7 @@ class StructureEngine:
         if not self.swing_highs or not self.swing_lows:
             return
 
-        close_i = df["close"].iloc[i]
-        high_i  = df["high"].iloc[i]
-        low_i   = df["low"].iloc[i]
+        close_i = self._close[i]
 
         # --- BULLISH checks ---
         sh_recent = self.swing_highs[-1]  # (bar_idx, price)

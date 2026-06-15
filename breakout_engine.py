@@ -22,6 +22,7 @@ class BreakoutEvent:
     direction: str          # "LONG" or "SHORT"
     structure_type: str     # "MSS_BULLISH" | "MSS_BEARISH" | "BOS_BULLISH" | "BOS_BEARISH"
     sweep_type: str         # The SSL_* or BSL_* that preceded this
+    sweep_bar: int
     breakout_bar: int
     breakout_price: float   # close price of breakout candle
     breakout_body_atr: float
@@ -100,6 +101,7 @@ class BreakoutEngine:
                     direction="LONG",
                     structure_type=struct_type,
                     sweep_type=liquidity_engine.ssl_sweep_type,
+                    sweep_bar=liquidity_engine.ssl_sweep_bar,
                     breakout_bar=i,
                     breakout_price=close_i,
                     breakout_body_atr=body_atr,
@@ -120,6 +122,7 @@ class BreakoutEngine:
                     direction="SHORT",
                     structure_type=struct_type,
                     sweep_type=liquidity_engine.bsl_sweep_type,
+                    sweep_bar=liquidity_engine.bsl_sweep_bar,
                     breakout_bar=i,
                     breakout_price=close_i,
                     breakout_body_atr=body_atr,

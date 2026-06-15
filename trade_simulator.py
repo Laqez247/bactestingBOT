@@ -60,7 +60,8 @@ class TradeRecord:
 
     # Prices
     entry_price: float = 0.0
-    sl_price: float = 0.0
+    sl_price: float = 0.0          # Current SL (may be moved to breakeven after TP1)
+    original_sl_price: float = 0.0 # Original SL at trade open — used for R multiple calc
     tp1_price: float = 0.0
     tp2_price: float = 0.0
 
@@ -134,11 +135,20 @@ def validate_setup(
 
     # Gate 3: Correct liquidity sweep for direction
     if direction == "LONG":
-        if not liquidity_engine.ssl_swept:
+        if breakout_event is None or not str(breakout_event.sweep_type).startswith("SSL_"):
             return "NO_SSL_SWEEP"
     else:
-        if not liquidity_engine.bsl_swept:
+        if breakout_event is None or not str(breakout_event.sweep_type).startswith("BSL_"):
             return "NO_BSL_SWEEP"
+
+    # Gate 3b: SHORT sweep quality filter — block low-WR sweep types for SHORT
+    # Uses liquidity_engine directly (same source as TradeRecord.ssl_bsl_sweep_type)
+    if direction == "SHORT":
+        blocked = _p("SHORT_BLOCKED_SWEEPS", [])
+        if blocked:
+            frozen_sweep = getattr(breakout_event, "sweep_type", "")
+            if frozen_sweep in blocked:
+                return f"SHORT_BLOCKED_SWEEP_{frozen_sweep}"
 
     # Gate 4: MSS or BOS confirmed (already consumed from structure_engine
     #          by breakout_engine, so we check via breakout_event presence)
@@ -267,7 +277,32 @@ class TradeSimulator:
         sl_dist = abs(entry_price - sl_price)
 
         # TP candidates
-        tp1, tp2 = tp_engine_obj.select_tp1_tp2(tp_candidates)
+        tp1_dynamic, tp2_dynamic = tp_engine_obj.select_tp1_tp2(tp_candidates)
+
+        # TP1_FIXED_RR: when > 0, place TP1 at a fixed R multiple from entry
+        # and use the best dynamic candidate as TP2 (high hit-rate partial close strategy)
+        tp1_fixed_rr = self._p("TP1_FIXED_RR", 0)
+        if self._p("DUAL_TP_ENABLED", False) and tp1_fixed_rr and tp1_fixed_rr > 0 and tp1_dynamic:
+            from dataclasses import replace
+            # Build a synthetic fixed TP1 at exactly TP1_FIXED_RR × SL distance from entry
+            if direction == "LONG":
+                fixed_tp1_price = entry_price + tp1_fixed_rr * sl_dist
+            else:
+                fixed_tp1_price = entry_price - tp1_fixed_rr * sl_dist
+            # Create fixed TP1 candidate (same score as best dynamic, but fixed price)
+            from tp_engine import TPCandidate
+            tp1_obj = TPCandidate(
+                price=round(fixed_tp1_price, 2),
+                score=tp1_dynamic.score,
+                rr=tp1_fixed_rr,
+                target_type=f"FIXED_{tp1_fixed_rr}R",
+            )
+            # Use original best dynamic target as TP2
+            tp1  = tp1_obj
+            tp2  = tp1_dynamic   # dynamic level becomes TP2
+        else:
+            tp1, tp2 = tp1_dynamic, tp2_dynamic
+
         best_tp_score = tp1.score if tp1 else 0.0
         best_rr       = tp1.rr   if tp1 else 0.0
 
@@ -296,28 +331,16 @@ class TradeSimulator:
         ts = df.index[i]
         session = self._get_session(ts)
 
-        # Determine sweep info from liquidity engine
-        if direction == "LONG":
-            sweep_type = liquidity_engine.ssl_sweep_type
-            sweep_bar  = liquidity_engine.ssl_sweep_bar
-            # Find the sweep event details
-            sweep_wick_atr = 0.0
-            sweep_wick_abs = 0.0
-            for ev in reversed(liquidity_engine.sweep_history):
-                if ev.sweep_type == sweep_type and ev.bar == sweep_bar:
-                    sweep_wick_atr = ev.wick_extension_atr
-                    sweep_wick_abs = ev.wick_extension_abs
-                    break
-        else:
-            sweep_type = liquidity_engine.bsl_sweep_type
-            sweep_bar  = liquidity_engine.bsl_sweep_bar
-            sweep_wick_atr = 0.0
-            sweep_wick_abs = 0.0
-            for ev in reversed(liquidity_engine.sweep_history):
-                if ev.sweep_type == sweep_type and ev.bar == sweep_bar:
-                    sweep_wick_atr = ev.wick_extension_atr
-                    sweep_wick_abs = ev.wick_extension_abs
-                    break
+        # Freeze sweep info from the breakout event, not mutable live liquidity state.
+        sweep_type = breakout_event.sweep_type if breakout_event else ""
+        sweep_bar = getattr(breakout_event, "sweep_bar", -1) if breakout_event else -1
+        sweep_wick_atr = 0.0
+        sweep_wick_abs = 0.0
+        for ev in reversed(liquidity_engine.sweep_history):
+            if ev.sweep_type == sweep_type and ev.bar == sweep_bar:
+                sweep_wick_atr = ev.wick_extension_atr
+                sweep_wick_abs = ev.wick_extension_abs
+                break
 
         rec = TradeRecord(
             setup_id=setup_id,
@@ -355,6 +378,7 @@ class TradeSimulator:
 
             entry_price=round(entry_price, 2),
             sl_price=round(sl_price, 2),
+            original_sl_price=round(sl_price, 2),  # frozen at open for R-multiple calc
             tp1_price=round(tp1.price, 2) if tp1 else 0.0,
             tp2_price=round(tp2.price, 2) if tp2 else 0.0,
 
@@ -459,22 +483,44 @@ class TradeSimulator:
         rec.exit_reason = exit_reason
         rec.bars_held   = bars_held
 
-        if rec.direction == "LONG":
-            r_raw = (exit_price - entry) / abs(entry - rec.sl_price) if abs(entry - rec.sl_price) > 0 else 0
-        else:
-            r_raw = (entry - exit_price) / abs(entry - rec.sl_price) if abs(entry - rec.sl_price) > 0 else 0
+        # Always use original_sl_price for R calculation — sl_price may have moved to BE
+        orig_sl   = rec.original_sl_price
+        orig_dist = abs(entry - orig_sl)
 
-        # Dual TP: blend TP1 and remainder
-        if dual_tp and rec.tp1_hit and exit_reason != "SL":
-            ratio1 = self._p("DUAL_TP_RATIO_1", 0.50)
+        if orig_dist > 0:
             if rec.direction == "LONG":
-                r_tp1  = (tp1 - entry) / abs(entry - rec.sl_price) * ratio1 if abs(entry - rec.sl_price) > 0 else 0
-                r_tp2  = r_raw * (1 - ratio1)
-                r_raw  = r_tp1 + r_tp2
+                r_raw = (exit_price - entry) / orig_dist
             else:
-                r_tp1  = (entry - tp1) / abs(entry - rec.sl_price) * ratio1 if abs(entry - rec.sl_price) > 0 else 0
-                r_tp2  = r_raw * (1 - ratio1)
-                r_raw  = r_tp1 + r_tp2
+                r_raw = (entry - exit_price) / orig_dist
+        else:
+            r_raw = 0.0
+
+        # Dual TP: blend partial-close at TP1 + remainder at TP2 (or BE exit)
+        if dual_tp and rec.tp1_hit and orig_dist > 0:
+            ratio1 = self._p("DUAL_TP_RATIO_1", 0.50)
+            if exit_reason == "SL":
+                # Hit SL from breakeven → remainder closed at entry (0R on remainder)
+                if rec.direction == "LONG":
+                    r_tp1 = (tp1 - entry) / orig_dist * ratio1
+                else:
+                    r_tp1 = (entry - tp1) / orig_dist * ratio1
+                r_raw = r_tp1 + 0.0 * (1 - ratio1)  # remainder at 0R (breakeven SL)
+            elif exit_reason in ("TP2", "TP1"):
+                if rec.direction == "LONG":
+                    r_tp1 = (tp1 - entry) / orig_dist * ratio1
+                    r_tp2 = (exit_price - entry) / orig_dist * (1 - ratio1)
+                else:
+                    r_tp1 = (entry - tp1) / orig_dist * ratio1
+                    r_tp2 = (entry - exit_price) / orig_dist * (1 - ratio1)
+                r_raw = r_tp1 + r_tp2
+            elif exit_reason == "TIMEOUT":
+                if rec.direction == "LONG":
+                    r_tp1 = (tp1 - entry) / orig_dist * ratio1
+                    r_rem = (exit_price - entry) / orig_dist * (1 - ratio1)
+                else:
+                    r_tp1 = (entry - tp1) / orig_dist * ratio1
+                    r_rem = (entry - exit_price) / orig_dist * (1 - ratio1)
+                r_raw = r_tp1 + r_rem
 
         rec.r_multiple = round(r_raw, 3)
         rec.mae_abs    = round(rec.mae_abs, 2)

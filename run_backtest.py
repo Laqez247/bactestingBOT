@@ -258,12 +258,13 @@ def run_single_backtest(
 
 def _estimate_entry(direction: str, zone_eng: ZoneEngine, spread: float, cfg: dict) -> float:
     slippage = cfg.get("SLIPPAGE", config.SLIPPAGE)
+    half_spread = spread / 2.0  # Limit orders cost half bid-ask spread
     zone = zone_eng.primary_zone
     if zone is None:
         return 0.0
     if direction == "LONG":
-        return zone.top + spread + slippage
-    return zone.bottom - spread - slippage
+        return zone.top + half_spread + slippage
+    return zone.bottom - half_spread - slippage
 
 
 def _estimate_sl(direction: str, zone_eng: ZoneEngine, atr_val: float, cfg: dict) -> float:
