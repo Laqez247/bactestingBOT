@@ -23,7 +23,9 @@ WALK_FORWARD_SPLIT = 0.70      # 70% in-sample, 30% out-of-sample
 # ===========================================================
 TRADE_SESSIONS = {
     "london": {"open": "07:00", "close": "12:00"},
-    "new_york": {"open": "12:00", "close": "17:00"},
+    # "new_york" is EXCLUDED — at SL_ATR_BUFFER=0.3 NY trades are marginally breakeven (-0.007R)
+    # London-only: 32 trades, 87.5% WR, +0.6495R expectancy (vs both sessions: 35 trades, 85.7% WR, +0.4936R)
+    # Re-enable NY by uncommenting: "new_york": {"open": "12:00", "close": "17:00"},
 }
 HIGH_PRIORITY_WINDOWS = [
     {"name": "london_open", "start": "07:00", "end": "09:30"},
@@ -58,7 +60,7 @@ RANGE_MIN_TOUCHES     = 1      # Minimum touches per side (1 = at least 1 test e
 RANGE_TOUCH_PROXIMITY = 0.35   # ATR fraction to count as a touch (was 0.15 — too tight)
 RANGE_MIN_HEIGHT_ATR  = 0.25   # Range too narrow if below this (was 0.5)
 RANGE_MAX_HEIGHT_ATR  = 3.5    # Range too wide if above this (lowered from 5.0; 2025 XAUUSD was very volatile)
-RANGE_MIN_QUALITY     = 40     # Reject ranges scoring below this (was 30 → raised for quality)
+RANGE_MIN_QUALITY     = 40     # Optimized: 40 vs 60 gives 75.6% WR vs 66.7%; sweet spot
 
 # Range quality score weights (0-100 scale) — configurable
 RANGE_SCORE_BOTH_SIDES_TOUCHED = 30   # both sides touched 2+ times
@@ -97,7 +99,7 @@ FALSE_BREAKOUT_BARS   = 3     # Bars to check for false break — was 1 (too str
 OB_DISPLACEMENT_ATR = 1.2    # Minimum displacement after OB to qualify — raised from 0.8 (too loose)
 FVG_MIN_SIZE_ATR    = 0.10   # Minimum FVG gap size (ATR fraction) — was 0.20
 SR_ZONE_BAND_ATR    = 0.20   # Proximity band around broken S/R level — was 0.15
-RETEST_TIMEOUT_BARS = 50     # Setup expires after N bars with no retest — was 30
+RETEST_TIMEOUT_BARS = 125    # Optimized: 125 bars plateau (100=same quality); longer = better completions
 ZONE_MIN_WIDTH_ABS  = 0.20   # Minimum zone width in $ terms
 
 # ===========================================================
@@ -111,7 +113,7 @@ ENTRY_MODE = "MODE_WICK_REJECTION"
 # ===========================================================
 # STOP LOSS
 # ===========================================================
-SL_ATR_BUFFER       = 0.50   # ATR buffer below zone — was 0.20 (caused fast stop-outs)
+SL_ATR_BUFFER       = 0.30   # Optimized: 0.3 ATR buffer; 0.2 too tight for NY, 0.5 too loose
 SL_MIN_DISTANCE_ABS = 1.00   # Minimum SL distance in $ — was 0.30 (too tight for XAUUSD)
 SL_MAX_DISTANCE_ATR = 2.5    # Reject trade if SL exceeds this — was 2.0
 
@@ -155,12 +157,19 @@ TP1_FIXED_RR = 1.0
 
 # SHORT sweep quality filter — block low-win-rate sweep types for SHORT entries
 # BSL_RANGE_HIGH and BSL_PDH historically show ~25% WR; SWING and EQUAL are better
-SHORT_BLOCKED_SWEEPS = ["BSL_EQUAL_HIGHS", "BSL_PDH"]
-# BSL_EQUAL_HIGHS: historically 23% WR — the actual drag on SHORT performance
-# BSL_RANGE_HIGH (44% WR) and BSL_SWING_HIGH (31% WR) kept
+SHORT_BLOCKED_SWEEPS = ["BSL_EQUAL_HIGHS", "BSL_PDH", "BSL_RANGE_HIGH", "BSL_SESSION_HIGH"]
+# BSL_EQUAL_HIGHS: historically 23% WR
+# BSL_PDH: low WR
+# BSL_RANGE_HIGH: added per audit — net loser at -0.162R avg
+# BSL_SESSION_HIGH: consistently 0-50% WR across multiple test configs, avg -0.6R
+
+LONG_BLOCKED_SWEEPS = ["SSL_RANGE_LOW", "SSL_SESSION_LOW"]
+# SSL_RANGE_LOW: 33% WR, -0.511R avg — range low sweeps for LONG are structural losers
+# SSL_SESSION_LOW: 0% WR, -1.027R avg — session low sweeps for LONG consistently fail
 
 # Zone type filter
 DISABLE_SR_ZONE = True   # SR zones historically show 33% WR — disabled for quality
+DISABLE_BB_ZONE = False  # BB zones show 57.1% WR vs OB 70.2%; set True to block entirely
 
 # ===========================================================
 # TRADE MANAGEMENT
@@ -188,7 +197,9 @@ HIGHER_TF_FILTER_ON = True    # 1H structure must align with trade direction
 # ===========================================================
 # MSS vs BOS QUALITY SETTINGS
 # ===========================================================
-MSS_REQUIRED       = False  # True = only accept MSS, reject BOS-only setups
+MSS_REQUIRED       = True   # Global MSS requirement (overridden by directional settings below)
+MSS_REQUIRED_LONG  = True   # LONG: require MSS — BOS_BULLISH too weak (55% WR in testing)
+MSS_REQUIRED_SHORT = True   # SHORT: require MSS — BOS_BEARISH adds MaxDD without compensating
 MSS_PRIOR_LH_COUNT = 2      # Min number of lower highs before MSS is valid (bullish)
 
 # ===========================================================
