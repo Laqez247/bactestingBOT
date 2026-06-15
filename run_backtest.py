@@ -239,13 +239,29 @@ def run_single_backtest(
         rec.exit_price  = float(df_exec["close"].iloc[last_i])
         rec.exit_reason = "TIMEOUT"
         rec.bars_held   = last_i - rec.entry_bar
-        entry = rec.entry_price
-        sl    = rec.sl_price
-        exit_p = rec.exit_price
-        if rec.direction == "LONG":
-            r = (exit_p - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+        entry  = rec.entry_price
+        # Bug #2 fix: use original_sl_price (SL may have moved to breakeven after TP1)
+        orig_sl = rec.original_sl_price
+        exit_p  = rec.exit_price
+        orig_dist = abs(entry - orig_sl)
+        if orig_dist > 0:
+            if rec.direction == "LONG":
+                r = (exit_p - entry) / orig_dist
+            else:
+                r = (entry - exit_p) / orig_dist
         else:
-            r = (entry - exit_p) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+            r = 0.0
+        # Blend dual-TP if TP1 was already hit before end-of-data
+        if rec.tp1_hit and orig_dist > 0:
+            ratio1 = cfg_overrides.get("DUAL_TP_RATIO_1", config.DUAL_TP_RATIO_1) if cfg_overrides else config.DUAL_TP_RATIO_1
+            tp1_px = rec.tp1_price
+            if rec.direction == "LONG":
+                r_tp1 = (tp1_px - entry) / orig_dist * ratio1
+                r_rem = (exit_p  - entry) / orig_dist * (1 - ratio1)
+            else:
+                r_tp1 = (entry - tp1_px) / orig_dist * ratio1
+                r_rem = (entry - exit_p)  / orig_dist * (1 - ratio1)
+            r = r_tp1 + r_rem
         rec.r_multiple = round(r, 3)
         sim.completed_trades.append(rec)
         sim._active_trade = None
