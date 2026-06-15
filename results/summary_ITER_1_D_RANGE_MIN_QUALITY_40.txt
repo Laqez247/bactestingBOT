@@ -3,83 +3,79 @@ EDGE 2 BACKTEST SUMMARY — ITERATION 1_D_RANGE_MIN_QUALITY_40
 ======================================================================
 Label: ITER1_D_RANGE_MIN_QUALITY_40
 
-  Total setups found   : 288
-  Setups rejected      : 145
-  Trades taken         : 143
-  Win rate             : 41.3%
-  Loss rate            : 58.7%
-  Expectancy (R)       : +0.4036
-  Profit factor        : 1.6784
-  Max drawdown (R)     : -7.2870
-  Avg R win            : +2.4204
-  Avg R loss           : -1.0129
-  Longest win streak   : 5
-  Longest loss streak  : 7
-  Avg bars held        : 12.5
-  False breakout rate  : 27.3%
-  Retest success rate  : 49.6%
+  Total setups found   : 405
+  Setups rejected      : 364
+  Trades taken         : 41
+  Win rate             : 75.6%
+  Loss rate            : 24.4%
+  Expectancy (R)       : +0.3158
+  Profit factor        : 2.2695
+  Max drawdown (R)     : -2.5680
+  Avg R win            : +0.7467
+  Avg R loss           : -1.0199
+  Longest win streak   : 7
+  Longest loss streak  : 2
+  Avg bars held        : 8.6
+  False breakout rate  : 56.1%
+  Retest success rate  : 10.1%
 
   REJECTION REASONS:
-    NO_VALID_RANGE                 : 61
-    HTF_NOT_BULLISH                : 53
-    HTF_NOT_BEARISH                : 17
-    SL_TOO_WIDE                    : 9
-    NO_BSL_SWEEP                   : 4
-    NO_SSL_SWEEP                   : 1
+    SHORT_BLOCKED_SWEEP_BSL_EQUAL_HIGHS : 92
+    MSS_REQUIRED_NOT_MET           : 92
+    NO_VALID_RANGE                 : 71
+    SHORT_BLOCKED_SWEEP_BSL_RANGE_HIGH : 55
+    HTF_NOT_BULLISH                : 30
+    HTF_NOT_BEARISH                : 14
+    SHORT_BLOCKED_SWEEP_BSL_PDH    : 10
 
   SESSION BREAKDOWN:
     Category                 |     N |      WR |   Exp(R) |         Stat
     ----------------------------------------------------------------
-    london                   |    69 |   42.0% |  +0.5189 |           ok
-    new_york                 |    74 |   40.5% |  +0.2962 |           ok
+    london                   |    27 |   85.2% |  +0.4978 | INSUFFICIENT
+    new_york                 |    14 |   57.1% |  -0.0351 | INSUFFICIENT
 
   DIRECTION BREAKDOWN:
     Category                 |     N |      WR |   Exp(R) |         Stat
     ----------------------------------------------------------------
-    LONG                     |    48 |   52.1% |  +0.6841 |           ok
-    SHORT                    |    95 |   35.8% |  +0.2619 |           ok
+    LONG                     |    12 |   66.7% |  +0.4448 | INSUFFICIENT
+    SHORT                    |    29 |   79.3% |  +0.2624 | INSUFFICIENT
 
   ZONE TYPE BREAKDOWN:
     Category                 |     N |      WR |   Exp(R) |         Stat
     ----------------------------------------------------------------
-    BB                       |    68 |   45.6% |  +0.5312 |           ok
-    FVG                      |     4 |   50.0% |  +0.5228 | INSUFFICIENT
-    OB                       |    56 |   35.7% |  +0.2516 |           ok
-    SR                       |    15 |   40.0% |  +0.3615 | INSUFFICIENT
+    BB                       |     8 |   50.0% |  +0.0476 | INSUFFICIENT
+    FVG                      |     1 |  100.0% |  +0.5000 | INSUFFICIENT
+    OB                       |    32 |   81.2% |  +0.3771 |           ok
 
   STRUCTURE BREAK TYPE (MSS vs BOS):
     Category                 |     N |      WR |   Exp(R) |         Stat
     ----------------------------------------------------------------
-    BOS_BEARISH              |    31 |   32.3% |  +0.0724 |           ok
-    BOS_BULLISH              |    27 |   48.1% |  +0.5988 | INSUFFICIENT
-    MSS_BEARISH              |    64 |   37.5% |  +0.3537 |           ok
-    MSS_BULLISH              |    21 |   57.1% |  +0.7939 | INSUFFICIENT
+    MSS_BEARISH              |    29 |   79.3% |  +0.2624 | INSUFFICIENT
+    MSS_BULLISH              |    12 |   66.7% |  +0.4448 | INSUFFICIENT
 
   SWEEP TYPE BREAKDOWN:
     Category                 |     N |      WR |   Exp(R) |         Stat
     ----------------------------------------------------------------
-    BSL_EQUAL_HIGHS          |    34 |   35.3% |  +0.2905 |           ok
-    BSL_PDH                  |     4 |   25.0% |  -0.4308 | INSUFFICIENT
-    BSL_RANGE_HIGH           |    18 |   27.8% |  +0.2775 | INSUFFICIENT
-    BSL_SESSION_HIGH         |     3 |   33.3% |  +0.7623 | INSUFFICIENT
-    BSL_SWING_HIGH           |    36 |   41.7% |  +0.2624 |           ok
-    SSL_EQUAL_LOWS           |    17 |   47.1% |  +0.1964 | INSUFFICIENT
-    SSL_RANGE_LOW            |    10 |   60.0% |  +1.0177 | INSUFFICIENT
-    SSL_SESSION_LOW          |     5 |   40.0% |  +0.0564 | INSUFFICIENT
-    SSL_SWING_LOW            |    16 |   56.2% |  +1.1901 | INSUFFICIENT
+    BSL_SESSION_HIGH         |     1 |  100.0% |  +0.4970 | INSUFFICIENT
+    BSL_SWING_HIGH           |    28 |   78.6% |  +0.2540 | INSUFFICIENT
+    SSL_EQUAL_LOWS           |     3 |  100.0% |  +1.3253 | INSUFFICIENT
+    SSL_PDL                  |     1 |  100.0% |  +0.4980 | INSUFFICIENT
+    SSL_RANGE_LOW            |     3 |   33.3% |  -0.5113 | INSUFFICIENT
+    SSL_SESSION_LOW          |     1 |    0.0% |  -1.0270 | INSUFFICIENT
+    SSL_SWING_LOW            |     4 |   75.0% |  +0.8562 | INSUFFICIENT
 
   PARAMETER SNAPSHOT:
     EXECUTION_TF                   = 5min
     PIVOT_LEFT                     = 3
     PIVOT_RIGHT                    = 3
     RANGE_MIN_QUALITY              = 40
-    SWEEP_MIN_WICK_ATR             = 0.15
+    SWEEP_MIN_WICK_ATR             = 0.2
     BREAKOUT_MIN_BODY_ATR          = 0.3
     RETEST_TIMEOUT_BARS            = 50
     SL_ATR_BUFFER                  = 0.5
     TP_MIN_SCORE                   = 20
     TP_MIN_RR                      = 1.0
-    MSS_REQUIRED                   = False
+    MSS_REQUIRED                   = True
     HIGHER_TF_FILTER_ON            = True
 
 ======================================================================
