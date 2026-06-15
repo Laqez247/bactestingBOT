@@ -142,13 +142,20 @@ def validate_setup(
             return "NO_BSL_SWEEP"
 
     # Gate 3b: SHORT sweep quality filter — block low-WR sweep types for SHORT
-    # Uses liquidity_engine directly (same source as TradeRecord.ssl_bsl_sweep_type)
     if direction == "SHORT":
         blocked = _p("SHORT_BLOCKED_SWEEPS", [])
         if blocked:
             frozen_sweep = getattr(breakout_event, "sweep_type", "")
             if frozen_sweep in blocked:
                 return f"SHORT_BLOCKED_SWEEP_{frozen_sweep}"
+
+    # Gate 3c: LONG sweep quality filter — block low-WR sweep types for LONG
+    if direction == "LONG":
+        blocked = _p("LONG_BLOCKED_SWEEPS", [])
+        if blocked:
+            frozen_sweep = getattr(breakout_event, "sweep_type", "")
+            if frozen_sweep in blocked:
+                return f"LONG_BLOCKED_SWEEP_{frozen_sweep}"
 
     # Gate 4: MSS or BOS confirmed (already consumed from structure_engine
     #          by breakout_engine, so we check via breakout_event presence)
@@ -159,8 +166,14 @@ def validate_setup(
     if direction == "SHORT" and breakout_event.direction != "SHORT":
         return "NO_BEARISH_MSS_BOS"
 
-    # Gate 4b: MSS_REQUIRED filter
-    if _p("MSS_REQUIRED", False):
+    # Gate 4b: Directional MSS_REQUIRED filter
+    # MSS_REQUIRED_LONG / MSS_REQUIRED_SHORT take priority over global MSS_REQUIRED
+    if direction == "LONG":
+        mss_needed = _p("MSS_REQUIRED_LONG", _p("MSS_REQUIRED", False))
+    else:
+        mss_needed = _p("MSS_REQUIRED_SHORT", _p("MSS_REQUIRED", False))
+
+    if mss_needed:
         needed = "MSS_BULLISH" if direction == "LONG" else "MSS_BEARISH"
         if breakout_event.structure_type != needed:
             return "MSS_REQUIRED_NOT_MET"
@@ -437,17 +450,27 @@ class TradeSimulator:
         rec.mae_abs = max(rec.mae_abs, adverse)
         rec.mfe_abs = max(rec.mfe_abs, favorable)
 
+        # --- Bug #3 fix: check ORIGINAL SL hit before processing TP1 ---
+        # If the original (pre-breakeven) SL and TP1 are both hit on the SAME bar,
+        # the trade must be a pure SL loss — TP1 cannot override an original SL breach.
+        orig_sl = rec.original_sl_price
+        orig_sl_hit_this_bar = (rec.direction == "LONG"  and low  <= orig_sl) or \
+                               (rec.direction == "SHORT" and high >= orig_sl)
+
         # --- TP1 partial close handling ---
         if dual_tp and not rec.tp1_hit and tp1 > 0:
             tp1_hit_this_bar = (rec.direction == "LONG" and high >= tp1) or \
                                (rec.direction == "SHORT" and low <= tp1)
-            if tp1_hit_this_bar:
+            if tp1_hit_this_bar and not orig_sl_hit_this_bar:
+                # Valid TP1: original SL was NOT breached on this bar
                 rec.tp1_hit = True
                 rec.partial_exit_price = tp1
                 if be_after_tp1:
                     # Move SL to breakeven
                     rec.sl_price = entry
                     sl = entry
+            # If both orig_sl_hit_this_bar AND tp1_hit: fall through to SL check below
+            # (orig_sl wins — recorded as pure SL loss, no partial credit)
 
         # --- Check SL and TP hits ---
         sl_hit = (rec.direction == "LONG"  and low  <= sl) or \
