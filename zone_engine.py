@@ -61,9 +61,11 @@ class ZoneEngine:
             self.zones.append(fvg)
 
         # 3. Breaker Block (BB) — prior failed OB, now acting from other side
-        bb = self._find_bb(breakout, i, df, atr_val)
-        if bb:
-            self.zones.append(bb)
+        # Audit: BB zones show 57.1% WR vs OB 70.2% — deprioritized below OB/FVG
+        if not self._p("DISABLE_BB_ZONE", False):
+            bb = self._find_bb(breakout, i, df, atr_val)
+            if bb:
+                self.zones.append(bb)
 
         # 4. Broken S/R (range boundary now acting as support/resistance)
         # Disabled when DISABLE_SR_ZONE=True (historically low win rate ~33%)
@@ -146,7 +148,7 @@ class ZoneEngine:
                             top=ob_top,
                             bottom=ob_bottom,
                             formed_bar=j,
-                            priority=2,
+                            priority=1,   # Raised to 1 — OB is highest structural priority
                         )
             else:  # SHORT
                 # Looking for last bullish candle (close > open)
@@ -163,7 +165,7 @@ class ZoneEngine:
                             top=ob_top,
                             bottom=ob_bottom,
                             formed_bar=j,
-                            priority=2,
+                            priority=1,   # Raised to 1 — OB is highest structural priority
                         )
         return None
 
@@ -200,7 +202,7 @@ class ZoneEngine:
                         top=c2_low,
                         bottom=c0_high,
                         formed_bar=n,
-                        priority=3,
+                        priority=2,   # FVG raised above BB — audit shows FVG 100% WR
                     )
             else:  # SHORT
                 gap = c0_low - c2_high
@@ -211,7 +213,7 @@ class ZoneEngine:
                         top=c0_low,
                         bottom=c2_high,
                         formed_bar=n,
-                        priority=3,
+                        priority=2,   # FVG raised above BB — audit shows FVG 100% WR
                     )
 
         return best_fvg
@@ -250,7 +252,7 @@ class ZoneEngine:
                         top=ob_top,
                         bottom=ob_bottom,
                         formed_bar=j,
-                        priority=1,  # highest priority
+                        priority=3,  # Lowered from 1 — below OB(1) and FVG(2) per audit
                     )
             else:  # SHORT
                 if close_j <= open_j:
@@ -267,7 +269,7 @@ class ZoneEngine:
                         top=ob_top,
                         bottom=ob_bottom,
                         formed_bar=j,
-                        priority=1,
+                        priority=3,  # Lowered from 1 — below OB(1) and FVG(2) per audit
                     )
         return None
 
