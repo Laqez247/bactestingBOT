@@ -154,9 +154,13 @@ def run_single_backtest(
             zone_eng.update_zones(i, df_exec)
 
             # Check for retest timeout
+            # Phase 2: use CONFLUENCE_OVERRIDE_MAX_BARS as the hard outer limit.
+            # Standard timeout (RETEST_TIMEOUT_BARS=125) is enforced inside
+            # validate_setup; between 125-175 bars only CONFLUENCE_OVERRIDE
+            # setups are permitted through the gate chain.
             if active_setup_bar >= 0:
-                timeout = p("RETEST_TIMEOUT_BARS", 50)
-                if i - active_setup_bar > timeout:
+                hard_timeout = p("CONFLUENCE_OVERRIDE_MAX_BARS", 175)
+                if i - active_setup_bar > hard_timeout:
                     zone_eng.clear()
                     active_setup_bar = -1
                     zone_reaction_confirmed = False
@@ -196,6 +200,11 @@ def run_single_backtest(
                     liquidity_engine=liq_eng
                 )
 
+                # Phase 2: pass htf_swing_count (exec-TF confirmed pivots as proxy)
+                htf_swing_count = (len(structure_eng.swing_highs) +
+                                   len(structure_eng.swing_lows))
+                bars_since_bo   = i - active_setup_bar if active_setup_bar >= 0 else 0
+
                 rec = sim.try_open_trade(
                     direction=direction,
                     i=i,
@@ -210,7 +219,9 @@ def run_single_backtest(
                     tp_candidates=tp_candidates,
                     tp_engine_obj=tp_eng,
                     current_spread=spread,
-                    iteration=iteration
+                    iteration=iteration,
+                    htf_swing_count=htf_swing_count,
+                    bars_since_breakout=bars_since_bo,
                 )
 
                 if rec is not None:
