@@ -1,21 +1,190 @@
 """
 trade_simulator.py — 10-Gate Validation Guard + Bar-by-Bar Trade Simulation.
 
-The 10-gate validation runs BEFORE every trade open.
-First gate failure = immediate rejection with logged reason.
-No partial credit. No override.
+PHASE 2 ADAPTIVE OVERRIDE FRAMEWORK:
+  Four contextual overrides can unlock ONE soft gate when compensation
+  factors meet the required threshold. Hard gates remain inviolable.
 
-Bar-by-bar simulation uses realistic fills:
-  Entry : limit order — zone boundary ± spread ± slippage
-  SL    : market order — SL price + slippage (extra cost)
-  TP    : limit order — TP price exactly (no additional slippage)
+Hard Gates (NEVER overridable):
+  - SL placement (structural invalidation point)
+  - Spread filter (real execution cost)
+  - TP1+BE structure (floor protection mechanic)
+  - Dynamic TP engine (core edge source)
+  - Lookahead bias (zero tolerance)
+
+Soft Gates (contextually overridable — one at a time):
+  Override 1 — MOMENTUM_OVERRIDE    : BOS → treated as MSS when displacement exceptional
+  Override 2 — CONFLUENCE_OVERRIDE  : stale zone → extended when confluence very high
+  Override 3 — SWEEP_MAGNITUDE_OVERRIDE : low range quality → accepted when sweep violent
+  Override 4 — CONTEXT_OVERRIDE     : blocked sweep type → accepted with full confluence stack
+
+Every override trade is tagged with override_type and compensation_score.
+Override trades are tracked and reported separately from standard trades.
 """
 
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import config
 
+
+# ===========================================================================
+# COMPENSATION SCORE ENGINE
+# ===========================================================================
+
+def compute_compensation_score(
+    sweep_wick_atr:       float,   # sweep wick extension in ATR units
+    breakout_body_atr:    float,   # breakout candle body in ATR units
+    zone_type:            str,     # "OB" | "FVG" | "BB" | "SR"
+    extra_confluence_types: list,  # extra overlapping level types beyond primary zone
+    htf_swing_count:      int,     # confirmed swings in exec-TF structure_engine
+    round_number_distance: float,  # absolute $ distance to nearest round-number level
+    pdh_pdl_overlap:      bool,    # does the zone overlap with prev-day high/low?
+    in_london_open:       bool,    # timestamp 07:00–09:30 UTC?
+) -> Dict[str, float]:
+    """
+    Compute per-setup compensation score for override eligibility.
+    Uses ONLY data available at bar T — no lookahead.
+
+    Returns a dict with per-factor scores and 'total'.
+
+    Section 3B scoring from prompt:
+      Sweep depth        : 0.5x→+10, 0.75x→+20, 1.0x+→+35
+      Displacement       : 1.0x→+10, 1.5x→+20, 2.0x+→+35
+      Zone confluence    : +15 per extra overlapping level type
+      HTF clarity        : 3-swing→+10, 5-swing→+20
+      Round number       : within $1.50→+20, within $3.00→+10
+      PDH/PDL alignment  : overlap→+15
+      Session timing     : London open 07:00–09:30→+15
+    """
+    s: Dict[str, float] = {}
+
+    # Factor 1: Sweep depth (wick_extension / ATR)
+    if sweep_wick_atr >= 1.0:
+        s["sweep_depth"] = 35.0
+    elif sweep_wick_atr >= 0.75:
+        s["sweep_depth"] = 20.0
+    elif sweep_wick_atr >= 0.5:
+        s["sweep_depth"] = 10.0
+    else:
+        s["sweep_depth"] = 0.0
+
+    # Factor 2: Breakout displacement (body_size / ATR)
+    if breakout_body_atr >= 2.0:
+        s["displacement"] = 35.0
+    elif breakout_body_atr >= 1.5:
+        s["displacement"] = 20.0
+    elif breakout_body_atr >= 1.0:
+        s["displacement"] = 10.0
+    else:
+        s["displacement"] = 0.0
+
+    # Factor 3: Zone confluence — extra overlapping level types beyond primary zone
+    n_extra = len([t for t in (extra_confluence_types or []) if t])
+    s["zone_confluence"] = min(n_extra, 3) * 15.0  # +15 per type, cap at 3 types (45 max)
+
+    # Factor 4: HTF alignment clarity (exec-TF swing count as proxy)
+    # ≥10 swings → clearly trending (treat as 5-swing), ≥5 → treat as 3-swing
+    if htf_swing_count >= 10:
+        s["htf_clarity"] = 20.0
+    elif htf_swing_count >= 5:
+        s["htf_clarity"] = 10.0
+    else:
+        s["htf_clarity"] = 0.0
+
+    # Factor 5: Round number proximity ($50 increments for XAUUSD)
+    if round_number_distance <= 1.5:
+        s["round_number"] = 20.0
+    elif round_number_distance <= 3.0:
+        s["round_number"] = 10.0
+    else:
+        s["round_number"] = 0.0
+
+    # Factor 6: PDH/PDL alignment
+    s["pdh_pdl"] = 15.0 if pdh_pdl_overlap else 0.0
+
+    # Factor 7: Session timing (London open window)
+    s["session_timing"] = 15.0 if in_london_open else 0.0
+
+    s["total"] = sum(v for k, v in s.items() if k != "total")
+    return s
+
+
+def _compute_confluence_context(
+    zone_type: str,
+    zone_top: float,
+    zone_bottom: float,
+    entry_price: float,
+    tp_candidates: list,
+    ts,
+    cfg: dict = None,
+) -> Dict[str, Any]:
+    """
+    Compute zone confluence context from data visible at entry bar T.
+    Returns:
+      extra_confluence_types : list of overlapping level-type labels
+      pdh_pdl_overlap        : bool
+      round_number_distance  : float ($)
+      in_london_open         : bool (07:00-09:30 UTC)
+    """
+    _cfg = cfg or {}
+    rn_increment = _cfg.get("ROUND_NUMBER_INCREMENT", getattr(config, "ROUND_NUMBER_INCREMENT", 50))
+
+    zone_mid = (zone_top + zone_bottom) / 2.0
+    extra_types = []
+
+    # 1. Round number check — nearest multiple of rn_increment
+    nearest_rn = round(zone_mid / rn_increment) * rn_increment
+    rn_dist = abs(zone_mid - nearest_rn)
+
+    if rn_dist <= 3.0:
+        extra_types.append("ROUND_NUMBER")
+
+    # 2. PDH/PDL overlap — check tp_candidates for PDH / PDL types near zone
+    pdh_pdl_overlap = False
+    for cand in (tp_candidates or []):
+        cand_type = getattr(cand, "target_type", "")
+        cand_price = getattr(cand, "price", 0.0)
+        if cand_type in ("PDH", "PDL", "PREV_DAY_HIGH", "PREV_DAY_LOW"):
+            # Overlap if candidate price is within the zone band ± 10%
+            zone_range = max(zone_top - zone_bottom, 0.5)
+            if abs(cand_price - zone_mid) <= zone_range * 1.5:
+                pdh_pdl_overlap = True
+                extra_types.append("PDH_PDL")
+                break
+
+    # 3. Multi-zone check — if zone_type itself is already a confluence marker
+    #    (FVG + OB overlap at same price level = strong confluence)
+    #    This is approximated: if zone_type is FVG, check if an OB candidate exists in tp_candidates
+    if zone_type == "FVG":
+        extra_types.append("FVG_DISPLACEMENT")
+
+    # 4. Session extreme check
+    for cand in (tp_candidates or []):
+        cand_type = getattr(cand, "target_type", "")
+        cand_price = getattr(cand, "price", 0.0)
+        if cand_type in ("SESSION_HIGH", "SESSION_LOW", "EQH", "EQL"):
+            zone_range = max(zone_top - zone_bottom, 0.5)
+            if abs(cand_price - zone_mid) <= zone_range * 2.0:
+                extra_types.append("SESSION_EXTREME")
+                break
+
+    # 5. London open check (07:00–09:30 UTC)
+    hour = ts.hour if hasattr(ts, "hour") else 8
+    minute = ts.minute if hasattr(ts, "minute") else 0
+    in_london_open = (hour == 7) or (hour == 8) or (hour == 9 and minute <= 30)
+
+    return {
+        "extra_confluence_types": list(set(extra_types)),
+        "pdh_pdl_overlap":        pdh_pdl_overlap,
+        "round_number_distance":  rn_dist,
+        "in_london_open":         in_london_open,
+    }
+
+
+# ===========================================================================
+# TRADE RECORD
+# ===========================================================================
 
 @dataclass
 class TradeRecord:
@@ -60,8 +229,8 @@ class TradeRecord:
 
     # Prices
     entry_price: float = 0.0
-    sl_price: float = 0.0          # Current SL (may be moved to breakeven after TP1)
-    original_sl_price: float = 0.0 # Original SL at trade open — used for R multiple calc
+    sl_price: float = 0.0
+    original_sl_price: float = 0.0
     tp1_price: float = 0.0
     tp2_price: float = 0.0
 
@@ -71,18 +240,18 @@ class TradeRecord:
     rr_tp2: float = 0.0
 
     # Validation
-    rejection_reason: str = ""  # empty = not rejected
+    rejection_reason: str = ""
 
     # Execution
     entry_bar: int = -1
     exit_bar: int = -1
-    exit_reason: str = ""     # TP1 | TP2 | SL | TIMEOUT | INVALIDATED
+    exit_reason: str = ""
     exit_price: float = 0.0
 
     # Performance
     r_multiple: float = 0.0
-    mae_abs: float = 0.0      # Max Adverse Excursion in $
-    mfe_abs: float = 0.0      # Max Favorable Excursion in $
+    mae_abs: float = 0.0
+    mfe_abs: float = 0.0
     bars_held: int = 0
 
     # Context
@@ -93,10 +262,16 @@ class TradeRecord:
     tp1_hit: bool = False
     partial_exit_price: float = 0.0
 
+    # Phase 2 adaptive override fields
+    override_type: str = "NONE"          # NONE | MOMENTUM_OVERRIDE | CONFLUENCE_OVERRIDE |
+                                          #        SWEEP_MAGNITUDE_OVERRIDE | CONTEXT_OVERRIDE
+    compensation_score: float = 0.0      # total compensation score at setup evaluation
+    compensation_breakdown: str = ""     # JSON-encoded per-factor scores (for audit)
 
-# ------------------------------------------------------------------
-# 10-GATE VALIDATION FUNCTION — runs before every trade open
-# ------------------------------------------------------------------
+
+# ===========================================================================
+# GATE VALIDATION — with Phase 2 override support
+# ===========================================================================
 
 def validate_setup(
     direction: str,
@@ -114,60 +289,137 @@ def validate_setup(
     sl_price: float,
     entry_price: float,
     current_spread: float,
-    cfg: dict = None
-) -> str:
+    cfg: dict = None,
+    # Phase 2: override context
+    comp_scores: Dict[str, float] = None,     # pre-computed compensation score dict
+    bars_since_breakout: int = 0,             # bars elapsed since zone was built
+) -> tuple:
     """
-    Sequential 10-gate guard function.
-    Returns "" if all gates pass, or the rejection reason string on first failure.
+    Sequential 10-gate validation.
+    Returns (rejection_reason: str, override_type: str).
+    rejection_reason = "" means all gates passed.
+    override_type = "NONE" unless a soft gate was overridden.
+
+    Hard gates: ALWAYS enforced, cannot be overridden.
+    Soft gates: may be overridden when compensation score meets threshold.
+
+    Guardrail: maximum ONE override per setup. If two soft gates fail,
+    the second failure causes rejection regardless of compensation score.
     """
     _p = lambda k, default=None: (cfg or {}).get(k, getattr(config, k, default))
+    override_used = False
+    override_type = "NONE"
+    comp = comp_scores or {}
+    total_score = comp.get("total", 0.0)
 
-    # Gate 1: HTF trend alignment
+    # -----------------------------------------------------------------------
+    # GATE 1: HTF trend alignment  [HARD — no override]
+    # -----------------------------------------------------------------------
     if _p("HIGHER_TF_FILTER_ON", True):
         if direction == "LONG" and htf_trend == "DOWNTREND":
-            return "HTF_NOT_BULLISH"
+            return "HTF_NOT_BULLISH", "NONE"
         if direction == "SHORT" and htf_trend == "UPTREND":
-            return "HTF_NOT_BEARISH"
+            return "HTF_NOT_BEARISH", "NONE"
 
-    # Gate 2: Valid compression range
+    # -----------------------------------------------------------------------
+    # GATE 2: Valid compression range  [SOFT — SWEEP_MAGNITUDE_OVERRIDE]
+    # -----------------------------------------------------------------------
     if not range_state.valid:
-        return "NO_VALID_RANGE"
+        return "NO_VALID_RANGE", "NONE"
 
-    # Gate 3: Correct liquidity sweep for direction
+    range_quality = getattr(range_state, "quality_score", 0.0)
+    rmq_threshold = _p("RANGE_MIN_QUALITY", 40)
+
+    if range_quality < rmq_threshold:
+        # Soft gate: SWEEP_MAGNITUDE_OVERRIDE
+        # Applies when: range quality 25-39 (below threshold but not garbage)
+        # Requires: total ≥40, sweep_depth ≥25 pts, at least 1 valid touch per side
+        sweep_pts  = comp.get("sweep_depth", 0.0)
+        touches_ok = (getattr(range_state, "touch_count_high", 0) >= 1 and
+                      getattr(range_state, "touch_count_low",  0) >= 1)
+
+        can_override = (
+            not override_used
+            and range_quality >= 25
+            and total_score >= 40
+            and sweep_pts >= 25       # wick >= 0.75x ATR
+            and touches_ok
+        )
+        if can_override:
+            override_used = True
+            override_type = "SWEEP_MAGNITUDE_OVERRIDE"
+        else:
+            return "RANGE_QUALITY_TOO_LOW", "NONE"
+
+    # -----------------------------------------------------------------------
+    # GATE 3: Correct liquidity sweep direction
+    # -----------------------------------------------------------------------
     if direction == "LONG":
         if breakout_event is None or not str(breakout_event.sweep_type).startswith("SSL_"):
-            return "NO_SSL_SWEEP"
+            return "NO_SSL_SWEEP", "NONE"
     else:
         if breakout_event is None or not str(breakout_event.sweep_type).startswith("BSL_"):
-            return "NO_BSL_SWEEP"
+            return "NO_BSL_SWEEP", "NONE"
 
-    # Gate 3b: SHORT sweep quality filter — block low-WR sweep types for SHORT
+    # Gate 3b: SHORT sweep quality filter  [SOFT — CONTEXT_OVERRIDE]
     if direction == "SHORT":
         blocked = _p("SHORT_BLOCKED_SWEEPS", [])
-        if blocked:
-            frozen_sweep = getattr(breakout_event, "sweep_type", "")
-            if frozen_sweep in blocked:
-                return f"SHORT_BLOCKED_SWEEP_{frozen_sweep}"
+        sweep_type = getattr(breakout_event, "sweep_type", "")
+        if blocked and sweep_type in blocked:
+            # CONTEXT_OVERRIDE — highest threshold, most protected gate
+            # Requires: total ≥55, displacement ≥20 pts (body ≥1.5x ATR),
+            #           zone_confluence ≥30 pts (2+ extra types),
+            #           htf_clarity ≥20 pts (5-swing sequence)
+            disp_pts    = comp.get("displacement",    0.0)
+            conf_pts    = comp.get("zone_confluence", 0.0)
+            htf_pts     = comp.get("htf_clarity",     0.0)
 
-    # Gate 3c: LONG sweep quality filter — block low-WR sweep types for LONG
+            can_override = (
+                not override_used
+                and total_score >= 55
+                and disp_pts >= 20     # body >= 1.5x ATR
+                and conf_pts >= 30     # 2+ extra confluence types
+                and htf_pts  >= 20     # 5-swing sequence
+            )
+            if can_override:
+                override_used = True
+                override_type = "CONTEXT_OVERRIDE"
+            else:
+                return f"SHORT_BLOCKED_SWEEP_{sweep_type}", "NONE"
+
+    # Gate 3c: LONG sweep quality filter  [SOFT — CONTEXT_OVERRIDE]
     if direction == "LONG":
         blocked = _p("LONG_BLOCKED_SWEEPS", [])
-        if blocked:
-            frozen_sweep = getattr(breakout_event, "sweep_type", "")
-            if frozen_sweep in blocked:
-                return f"LONG_BLOCKED_SWEEP_{frozen_sweep}"
+        sweep_type = getattr(breakout_event, "sweep_type", "")
+        if blocked and sweep_type in blocked:
+            disp_pts    = comp.get("displacement",    0.0)
+            conf_pts    = comp.get("zone_confluence", 0.0)
+            htf_pts     = comp.get("htf_clarity",     0.0)
 
-    # Gate 4: MSS or BOS confirmed (already consumed from structure_engine
-    #          by breakout_engine, so we check via breakout_event presence)
+            can_override = (
+                not override_used
+                and total_score >= 55
+                and disp_pts >= 20
+                and conf_pts >= 30
+                and htf_pts  >= 20
+            )
+            if can_override:
+                override_used = True
+                override_type = "CONTEXT_OVERRIDE"
+            else:
+                return f"LONG_BLOCKED_SWEEP_{sweep_type}", "NONE"
+
+    # -----------------------------------------------------------------------
+    # GATE 4: Structure break confirmed
+    # -----------------------------------------------------------------------
     if breakout_event is None:
-        return "NO_BULLISH_MSS_BOS" if direction == "LONG" else "NO_BEARISH_MSS_BOS"
+        return "NO_BULLISH_MSS_BOS" if direction == "LONG" else "NO_BEARISH_MSS_BOS", "NONE"
     if direction == "LONG" and breakout_event.direction != "LONG":
-        return "NO_BULLISH_MSS_BOS"
+        return "NO_BULLISH_MSS_BOS", "NONE"
     if direction == "SHORT" and breakout_event.direction != "SHORT":
-        return "NO_BEARISH_MSS_BOS"
+        return "NO_BEARISH_MSS_BOS", "NONE"
 
-    # Gate 4b: Directional MSS_REQUIRED filter
-    # MSS_REQUIRED_LONG / MSS_REQUIRED_SHORT take priority over global MSS_REQUIRED
+    # Gate 4b: Directional MSS_REQUIRED filter  [SOFT — MOMENTUM_OVERRIDE]
     if direction == "LONG":
         mss_needed = _p("MSS_REQUIRED_LONG", _p("MSS_REQUIRED", False))
     else:
@@ -176,47 +428,100 @@ def validate_setup(
     if mss_needed:
         needed = "MSS_BULLISH" if direction == "LONG" else "MSS_BEARISH"
         if breakout_event.structure_type != needed:
-            return "MSS_REQUIRED_NOT_MET"
+            # MOMENTUM_OVERRIDE: BOS so violent it behaves like MSS
+            # Requires: total ≥45, displacement ≥20 pts (body ≥1.5x ATR),
+            #           at least one other factor contributing
+            disp_pts   = comp.get("displacement", 0.0)
+            other_pts  = total_score - disp_pts
 
-    # Gate 5: Valid retest zone exists
+            can_override = (
+                not override_used
+                and total_score >= 45
+                and disp_pts >= 20     # body >= 1.5x ATR — minimum for momentum
+                and other_pts >= 10    # at least one other compensating factor
+            )
+            if can_override:
+                override_used = True
+                override_type = "MOMENTUM_OVERRIDE"
+            else:
+                return "MSS_REQUIRED_NOT_MET", "NONE"
+
+    # -----------------------------------------------------------------------
+    # GATE 5: Valid retest zone exists  [effectively checked via timeout logic]
+    # -----------------------------------------------------------------------
     if not zone_engine.has_valid_zone:
-        return "NO_RETEST_ZONE"
+        return "NO_RETEST_ZONE", "NONE"
 
-    # Gate 6: Zone reaction confirmed
+    # Gate 5b: RETEST_TIMEOUT extension via CONFLUENCE_OVERRIDE
+    # The timeout is enforced in run_backtest.py. Here we handle the edge case
+    # where bars_since_breakout is passed in and exceeds the base timeout.
+    base_timeout   = _p("RETEST_TIMEOUT_BARS", 125)
+    extend_timeout = 175  # absolute maximum even with override
+
+    if bars_since_breakout > base_timeout:
+        # We're in the extended window (base_timeout+1 to 175)
+        if bars_since_breakout <= extend_timeout:
+            # CONFLUENCE_OVERRIDE: zone remains valid due to exceptional confluence
+            # Requires: total ≥35, zone_confluence + round_number ≥20 pts
+            conf_rn_pts = comp.get("zone_confluence", 0.0) + comp.get("round_number", 0.0)
+
+            can_override = (
+                not override_used
+                and total_score >= 35
+                and conf_rn_pts >= 20
+            )
+            if can_override:
+                override_used = True
+                override_type = "CONFLUENCE_OVERRIDE"
+            else:
+                return "RETEST_TIMEOUT_EXCEEDED", "NONE"
+        else:
+            return "RETEST_TIMEOUT_EXCEEDED", "NONE"
+
+    # -----------------------------------------------------------------------
+    # GATE 6: Zone reaction confirmed
+    # -----------------------------------------------------------------------
     if not zone_reaction:
-        return "NO_ZONE_REACTION"
+        return "NO_ZONE_REACTION", "NONE"
 
-    # Gate 7: Valid dynamic TP target exists
+    # -----------------------------------------------------------------------
+    # GATE 7: Valid dynamic TP target  [HARD — no override]
+    # -----------------------------------------------------------------------
     tp_min_score = _p("TP_MIN_SCORE", 30)
     if best_tp_score < tp_min_score:
-        return "NO_VALID_TARGET"
+        return "NO_VALID_TARGET", "NONE"
 
-    # Gate 8: RR is acceptable
+    # -----------------------------------------------------------------------
+    # GATE 8: RR check  [HARD — no override]
+    # -----------------------------------------------------------------------
     tp_min_rr = _p("TP_MIN_RR", 1.0)
     if best_rr < tp_min_rr:
-        return "RR_TOO_LOW"
+        return "RR_TOO_LOW", "NONE"
 
-    # Gate 9: SL distance within limits
+    # -----------------------------------------------------------------------
+    # GATE 9: SL distance  [HARD — no override]
+    # -----------------------------------------------------------------------
     sl_max_dist_atr = _p("SL_MAX_DISTANCE_ATR", 2.0)
     sl_min_dist_abs = _p("SL_MIN_DISTANCE_ABS", 0.30)
     sl_dist = abs(entry_price - sl_price)
     if sl_dist > sl_max_dist_atr * atr_val:
-        return "SL_TOO_WIDE"
+        return "SL_TOO_WIDE", "NONE"
     if sl_dist < sl_min_dist_abs:
-        sl_price = entry_price - sl_min_dist_abs if direction == "LONG" else entry_price + sl_min_dist_abs
+        pass  # adjust handled in try_open_trade
 
-    # Gate 10: Spread filter
+    # -----------------------------------------------------------------------
+    # GATE 10: Spread filter  [HARD — no override]
+    # -----------------------------------------------------------------------
     spread_max = _p("SPREAD_FILTER_MAX", 1.00)
     if current_spread > spread_max:
-        return "SPREAD_TOO_HIGH"
+        return "SPREAD_TOO_HIGH", "NONE"
 
-    # All gates passed
-    return ""
+    return "", override_type
 
 
-# ------------------------------------------------------------------
+# ===========================================================================
 # TRADE SIMULATOR
-# ------------------------------------------------------------------
+# ===========================================================================
 
 class TradeSimulator:
     """
@@ -251,11 +556,14 @@ class TradeSimulator:
         tp_candidates: list,
         tp_engine_obj,
         current_spread: float,
-        iteration: int = 0
+        iteration: int = 0,
+        # Phase 2: additional context for compensation scoring
+        htf_swing_count: int = 0,
+        bars_since_breakout: int = 0,
     ) -> Optional[TradeRecord]:
         """
-        Attempt to open a trade. Runs 10-gate validation first.
-        Returns the TradeRecord on success, or a rejected record on failure.
+        Attempt to open a trade. Runs 10-gate validation + override checks.
+        Returns the TradeRecord on success, or None on rejection.
         """
         atr_val = float(atr.iloc[i]) if not pd.isna(atr.iloc[i]) else 1.0
         zone    = zone_engine.primary_zone
@@ -263,24 +571,18 @@ class TradeSimulator:
         if zone is None:
             return None
 
-        # Compute entry, SL prices
-        half_spread = current_spread / 2.0   # limit orders cost half-spread
+        half_spread = current_spread / 2.0
         slippage    = self._p("SLIPPAGE", 0.05)
         sl_buffer   = self._p("SL_ATR_BUFFER", 0.50) * atr_val
         sl_min_abs  = self._p("SL_MIN_DISTANCE_ABS", 1.00)
 
         if direction == "LONG":
-            # Limit buy at zone top (pullback into zone).
-            # Cost = half bid-ask spread + slippage
             entry_price = zone.top + half_spread + slippage
-            # SL: below zone bottom by an ATR buffer, minimum 1.0 × ATR_BUFFER
             sl_price    = zone.bottom - sl_buffer
-            # Enforce minimum SL distance so noise can't stop us instantly
             actual_dist = entry_price - sl_price
             if actual_dist < sl_min_abs:
                 sl_price = entry_price - sl_min_abs
         else:
-            # Limit sell at zone bottom (pullback into zone from below)
             entry_price = zone.bottom - half_spread - slippage
             sl_price    = zone.top + sl_buffer
             actual_dist = sl_price - entry_price
@@ -289,20 +591,14 @@ class TradeSimulator:
 
         sl_dist = abs(entry_price - sl_price)
 
-        # TP candidates
         tp1_dynamic, tp2_dynamic = tp_engine_obj.select_tp1_tp2(tp_candidates)
 
-        # TP1_FIXED_RR: when > 0, place TP1 at a fixed R multiple from entry
-        # and use the best dynamic candidate as TP2 (high hit-rate partial close strategy)
         tp1_fixed_rr = self._p("TP1_FIXED_RR", 0)
         if self._p("DUAL_TP_ENABLED", False) and tp1_fixed_rr and tp1_fixed_rr > 0 and tp1_dynamic:
-            from dataclasses import replace
-            # Build a synthetic fixed TP1 at exactly TP1_FIXED_RR × SL distance from entry
             if direction == "LONG":
                 fixed_tp1_price = entry_price + tp1_fixed_rr * sl_dist
             else:
                 fixed_tp1_price = entry_price - tp1_fixed_rr * sl_dist
-            # Create fixed TP1 candidate (same score as best dynamic, but fixed price)
             from tp_engine import TPCandidate
             tp1_obj = TPCandidate(
                 price=round(fixed_tp1_price, 2),
@@ -310,17 +606,55 @@ class TradeSimulator:
                 rr=tp1_fixed_rr,
                 target_type=f"FIXED_{tp1_fixed_rr}R",
             )
-            # Use original best dynamic target as TP2
-            tp1  = tp1_obj
-            tp2  = tp1_dynamic   # dynamic level becomes TP2
+            tp1 = tp1_obj
+            tp2 = tp1_dynamic
         else:
             tp1, tp2 = tp1_dynamic, tp2_dynamic
 
         best_tp_score = tp1.score if tp1 else 0.0
         best_rr       = tp1.rr   if tp1 else 0.0
 
-        # 10-gate validation
-        rejection = validate_setup(
+        # ----------------------------------------------------------------
+        # Phase 2: Compute compensation context (bar-T only, no lookahead)
+        # ----------------------------------------------------------------
+        ts = df.index[i]
+        sweep_wick_atr = 0.0
+        sweep_wick_abs = 0.0
+        sweep_type_raw = getattr(breakout_event, "sweep_type", "") if breakout_event else ""
+        sweep_bar_raw  = getattr(breakout_event, "sweep_bar", -1)  if breakout_event else -1
+        for ev in reversed(liquidity_engine.sweep_history):
+            if ev.sweep_type == sweep_type_raw and ev.bar == sweep_bar_raw:
+                sweep_wick_atr = ev.wick_extension_atr
+                sweep_wick_abs = ev.wick_extension_abs
+                break
+
+        breakout_body_atr = getattr(breakout_event, "breakout_body_atr", 0.0) if breakout_event else 0.0
+
+        conf_ctx = _compute_confluence_context(
+            zone_type=zone.zone_type if zone else "",
+            zone_top=zone.top if zone else entry_price,
+            zone_bottom=zone.bottom if zone else entry_price,
+            entry_price=entry_price,
+            tp_candidates=tp_candidates,
+            ts=ts,
+            cfg=self.cfg,
+        )
+
+        comp_scores = compute_compensation_score(
+            sweep_wick_atr=sweep_wick_atr,
+            breakout_body_atr=breakout_body_atr,
+            zone_type=zone.zone_type if zone else "",
+            extra_confluence_types=conf_ctx["extra_confluence_types"],
+            htf_swing_count=htf_swing_count,
+            round_number_distance=conf_ctx["round_number_distance"],
+            pdh_pdl_overlap=conf_ctx["pdh_pdl_overlap"],
+            in_london_open=conf_ctx["in_london_open"],
+        )
+
+        # ----------------------------------------------------------------
+        # Run gate validation with override context
+        # ----------------------------------------------------------------
+        rejection, override_type = validate_setup(
             direction=direction,
             i=i,
             df=df,
@@ -336,24 +670,19 @@ class TradeSimulator:
             sl_price=sl_price,
             entry_price=entry_price,
             current_spread=current_spread,
-            cfg=self.cfg
+            cfg=self.cfg,
+            comp_scores=comp_scores,
+            bars_since_breakout=bars_since_breakout,
         )
 
         self._setup_counter += 1
         setup_id = f"SETUP_{self._setup_counter:05d}"
-        ts = df.index[i]
         session = self._get_session(ts)
 
-        # Freeze sweep info from the breakout event, not mutable live liquidity state.
-        sweep_type = breakout_event.sweep_type if breakout_event else ""
-        sweep_bar = getattr(breakout_event, "sweep_bar", -1) if breakout_event else -1
-        sweep_wick_atr = 0.0
-        sweep_wick_abs = 0.0
-        for ev in reversed(liquidity_engine.sweep_history):
-            if ev.sweep_type == sweep_type and ev.bar == sweep_bar:
-                sweep_wick_atr = ev.wick_extension_atr
-                sweep_wick_abs = ev.wick_extension_abs
-                break
+        # Encode compensation breakdown for audit (compact)
+        import json
+        comp_detail = {k: round(v, 1) for k, v in comp_scores.items()}
+        comp_str = json.dumps(comp_detail, separators=(",", ":"))
 
         rec = TradeRecord(
             setup_id=setup_id,
@@ -372,26 +701,32 @@ class TradeSimulator:
             atr_at_setup=round(atr_val, 4),
             range_height_atr=round(range_state.height_atr, 3),
 
-            ssl_bsl_sweep_type=sweep_type,
-            sweep_bar=sweep_bar,
+            ssl_bsl_sweep_type=sweep_type_raw,
+            sweep_bar=sweep_bar_raw,
             sweep_wick_size_atr=round(sweep_wick_atr, 3),
             sweep_wick_size_abs=round(sweep_wick_abs, 3),
 
-            structure_break_type=breakout_event.structure_type if breakout_event else "",
+            structure_break_type=(
+                "BOS_MOMENTUM_OVERRIDE" if override_type == "MOMENTUM_OVERRIDE"
+                else (breakout_event.structure_type if breakout_event else "")
+            ),
             breakout_bar=breakout_event.breakout_bar if breakout_event else -1,
             breakout_direction=breakout_event.direction if breakout_event else "",
-            breakout_body_atr=round(breakout_event.breakout_body_atr, 3) if breakout_event else 0.0,
+            breakout_body_atr=round(breakout_body_atr, 3),
             breakout_quality=breakout_event.quality if breakout_event else "",
 
             htf_trend=htf_trend,
 
-            retest_zone_type=zone.zone_type if zone else "",
+            retest_zone_type=(
+                "ZONE_CONFLUENCE_EXTENDED" if override_type == "CONFLUENCE_OVERRIDE"
+                else (zone.zone_type if zone else "")
+            ),
             retest_zone_top=round(zone.top, 2) if zone else 0.0,
             retest_zone_bottom=round(zone.bottom, 2) if zone else 0.0,
 
             entry_price=round(entry_price, 2),
             sl_price=round(sl_price, 2),
-            original_sl_price=round(sl_price, 2),  # frozen at open for R-multiple calc
+            original_sl_price=round(sl_price, 2),
             tp1_price=round(tp1.price, 2) if tp1 else 0.0,
             tp2_price=round(tp2.price, 2) if tp2 else 0.0,
 
@@ -403,6 +738,10 @@ class TradeSimulator:
             entry_bar=i if not rejection else -1,
             session=session,
             timestamp=str(ts),
+
+            override_type=override_type,
+            compensation_score=round(comp_scores.get("total", 0.0), 1),
+            compensation_breakdown=comp_str,
         )
 
         if rejection:
@@ -439,7 +778,6 @@ class TradeSimulator:
 
         bars_held = i - rec.entry_bar
 
-        # MAE / MFE tracking
         if rec.direction == "LONG":
             adverse   = entry - low
             favorable = high - entry
@@ -450,29 +788,20 @@ class TradeSimulator:
         rec.mae_abs = max(rec.mae_abs, adverse)
         rec.mfe_abs = max(rec.mfe_abs, favorable)
 
-        # --- Bug #3 fix: check ORIGINAL SL hit before processing TP1 ---
-        # If the original (pre-breakeven) SL and TP1 are both hit on the SAME bar,
-        # the trade must be a pure SL loss — TP1 cannot override an original SL breach.
         orig_sl = rec.original_sl_price
         orig_sl_hit_this_bar = (rec.direction == "LONG"  and low  <= orig_sl) or \
                                (rec.direction == "SHORT" and high >= orig_sl)
 
-        # --- TP1 partial close handling ---
         if dual_tp and not rec.tp1_hit and tp1 > 0:
             tp1_hit_this_bar = (rec.direction == "LONG" and high >= tp1) or \
                                (rec.direction == "SHORT" and low <= tp1)
             if tp1_hit_this_bar and not orig_sl_hit_this_bar:
-                # Valid TP1: original SL was NOT breached on this bar
                 rec.tp1_hit = True
                 rec.partial_exit_price = tp1
                 if be_after_tp1:
-                    # Move SL to breakeven
                     rec.sl_price = entry
                     sl = entry
-            # If both orig_sl_hit_this_bar AND tp1_hit: fall through to SL check below
-            # (orig_sl wins — recorded as pure SL loss, no partial credit)
 
-        # --- Check SL and TP hits ---
         sl_hit = (rec.direction == "LONG"  and low  <= sl) or \
                  (rec.direction == "SHORT" and high >= sl)
         tp_price = tp2 if (dual_tp and rec.tp1_hit and tp2) else tp1
@@ -481,32 +810,29 @@ class TradeSimulator:
             (rec.direction == "SHORT" and low  <= tp_price)
         )
 
-        # --- Same-bar resolution ---
         if sl_hit and tp_hit:
             if same_bar == "SL":
                 sl_hit, tp_hit = True, False
             else:
                 sl_hit, tp_hit = False, True
 
-        # --- Close trade ---
         if sl_hit:
             exit_price  = sl - slippage if rec.direction == "LONG" else sl + slippage
             exit_reason = "SL"
         elif tp_hit:
-            exit_price  = tp_price  # limit order, no extra slippage
+            exit_price  = tp_price
             exit_reason = "TP2" if (dual_tp and rec.tp1_hit) else "TP1"
         elif bars_held >= timeout:
             exit_price  = close_price
             exit_reason = "TIMEOUT"
         else:
-            return None  # trade still open
+            return None
 
         rec.exit_bar   = i
         rec.exit_price = round(exit_price, 2)
         rec.exit_reason = exit_reason
         rec.bars_held   = bars_held
 
-        # Always use original_sl_price for R calculation — sl_price may have moved to BE
         orig_sl   = rec.original_sl_price
         orig_dist = abs(entry - orig_sl)
 
@@ -518,16 +844,14 @@ class TradeSimulator:
         else:
             r_raw = 0.0
 
-        # Dual TP: blend partial-close at TP1 + remainder at TP2 (or BE exit)
         if dual_tp and rec.tp1_hit and orig_dist > 0:
             ratio1 = self._p("DUAL_TP_RATIO_1", 0.50)
             if exit_reason == "SL":
-                # Hit SL from breakeven → remainder closed at entry (0R on remainder)
                 if rec.direction == "LONG":
                     r_tp1 = (tp1 - entry) / orig_dist * ratio1
                 else:
                     r_tp1 = (entry - tp1) / orig_dist * ratio1
-                r_raw = r_tp1 + 0.0 * (1 - ratio1)  # remainder at 0R (breakeven SL)
+                r_raw = r_tp1 + 0.0 * (1 - ratio1)
             elif exit_reason in ("TP2", "TP1"):
                 if rec.direction == "LONG":
                     r_tp1 = (tp1 - entry) / orig_dist * ratio1
