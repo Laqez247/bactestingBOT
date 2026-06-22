@@ -14,8 +14,8 @@ DATA_SOURCE = "twelvedata"
 # ===========================================================
 # DATE RANGE
 # ===========================================================
-BACKTEST_START = "2024-01-01"
-BACKTEST_END   = "2026-5-31"
+BACKTEST_START = "2024-04-09"
+BACKTEST_END   = "2026-06-19"
 WALK_FORWARD_SPLIT = 0.70      # 70% in-sample, 30% out-of-sample
 
 # ===========================================================
@@ -75,6 +75,26 @@ RANGE_PREMIUM_THRESHOLD        = 75   # premium range if score >= this
 ASIAN_SESSION_OPEN  = "00:00"
 ASIAN_SESSION_CLOSE = "07:00"
 OFF_HOURS_OPEN      = "17:00"
+
+# ===========================================================
+# PHASE 2 ADAPTIVE OVERRIDE FRAMEWORK
+# ===========================================================
+# Round-number increment for XAUUSD ($50 levels = 2500, 2550, 2600 …)
+ROUND_NUMBER_INCREMENT = 50
+
+# Override thresholds — see trade_simulator.py for scoring factors
+MOMENTUM_OVERRIDE_MIN_SCORE         = 45   # min total comp score for BOS→MSS override
+MOMENTUM_OVERRIDE_MIN_DISPLACEMENT  = 20   # min displacement pts (body ≥ 1.5x ATR)
+CONFLUENCE_OVERRIDE_MIN_SCORE       = 35   # min total score for timeout extension
+CONFLUENCE_OVERRIDE_MIN_CONF_RN     = 20   # min confluence+round_number pts
+SWEEP_MAG_OVERRIDE_MIN_SCORE        = 40   # min total score for range quality bypass
+SWEEP_MAG_OVERRIDE_MIN_SWEEP        = 25   # min sweep_depth pts (wick ≥ 0.75x ATR)
+SWEEP_MAG_OVERRIDE_MIN_RANGE_QUAL   = 25   # absolute minimum range quality (never below)
+CONTEXT_OVERRIDE_MIN_SCORE          = 55   # min total score for blocked-sweep override
+CONTEXT_OVERRIDE_MIN_DISPLACEMENT   = 20   # displacement ≥ 1.5x ATR
+CONTEXT_OVERRIDE_MIN_CONFLUENCE     = 30   # zone_confluence ≥ 2 extra types
+CONTEXT_OVERRIDE_MIN_HTF            = 20   # htf_clarity ≥ 5-swing sequence
+CONFLUENCE_OVERRIDE_MAX_BARS        = 175  # absolute maximum bars even with override
 
 # ===========================================================
 # LIQUIDITY GRAB (SWEEP)
