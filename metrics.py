@@ -61,6 +61,19 @@ def compute_metrics(trades: List[TradeRecord],
     # Rejection breakdown
     rejection_breakdown = _count_by_field(rejected, "rejection_reason")
 
+    # Phase 2: Override type breakdown (completed trades only)
+    by_override_type = _breakdown_by_field(trades, "override_type")
+    override_trades = [t for t in trades if getattr(t, "override_type", "NONE") not in ("NONE", "", None)]
+    n_override = len(override_trades)
+    override_win_rate = (
+        len([t for t in override_trades if t.r_multiple > 0]) / n_override
+        if n_override > 0 else 0.0
+    )
+    override_expectancy = (
+        sum(t.r_multiple for t in override_trades) / n_override
+        if n_override > 0 else 0.0
+    )
+
     # Session breakdown
     by_session = _breakdown_by_field(trades, "session")
 
@@ -128,6 +141,11 @@ def compute_metrics(trades: List[TradeRecord],
         "by_ssl_bsl_type":      by_sweep_type,
         "retest_success_rate":  round(retest_success_rate, 4),
         "false_breakout_rate":  round(false_breakout_rate, 4),
+        # Phase 2 override metrics
+        "by_override_type":     by_override_type,
+        "n_override_trades":    n_override,
+        "override_win_rate":    round(override_win_rate, 4),
+        "override_expectancy":  round(override_expectancy, 4),
     }
 
 
@@ -146,6 +164,8 @@ def _empty_metrics(n_setups, n_rejected, label, insufficient) -> Dict:
         "by_zone_type": {}, "by_breakout_quality": {}, "by_range_quality": {},
         "by_htf_alignment": {}, "by_structure_break_type": {}, "by_ssl_bsl_type": {},
         "retest_success_rate": 0.0, "false_breakout_rate": 0.0,
+        "by_override_type": {}, "n_override_trades": 0,
+        "override_win_rate": 0.0, "override_expectancy": 0.0,
     }
 
 
