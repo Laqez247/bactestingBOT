@@ -133,6 +133,21 @@ def print_results(m: dict, cfg: dict, label: str = "RUN"):
     for d, dm in sorted(m["by_direction"].items()):
         print(f"    {d:<10} n={dm['n']:>4}  WR={dm['win_rate']:.1%}  Exp={dm['expectancy_r']:+.4f}R")
 
+    # Phase 2: Override breakdown
+    n_ov = m.get("n_override_trades", 0)
+    if n_ov > 0:
+        print(f"\n  --- PHASE 2 OVERRIDE TRADES (n={n_ov}) ---")
+        ov_wr  = m.get("override_win_rate", 0)
+        ov_exp = m.get("override_expectancy", 0)
+        print(f"    Override WR       : {ov_wr:.1%}")
+        print(f"    Override Expectancy: {ov_exp:+.4f}R")
+        for ov_type, ov_m in m.get("by_override_type", {}).items():
+            if ov_type not in ("NONE", ""):
+                print(f"    {ov_type:<35} n={ov_m['n']:>3}  WR={ov_m['win_rate']:.1%}  Exp={ov_m['expectancy_r']:+.4f}R")
+    else:
+        print(f"\n  --- PHASE 2 OVERRIDES ---")
+        print(f"    No override trades triggered this run")
+
     print(f"\n  --- KEY PARAMS ACTIVE ---")
     for k, v in cfg.items():
         if k in ("RANGE_MIN_QUALITY","MSS_REQUIRED","BREAKOUT_MIN_BODY_ATR",
