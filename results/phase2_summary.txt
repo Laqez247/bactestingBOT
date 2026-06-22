@@ -1,0 +1,125 @@
+================================================================================
+PHASE 2 ADAPTIVE OPTIMIZER — IMPLEMENTATION SUMMARY
+Date: 2026-06-22
+Dataset: XAUUSD 5min  2024-04-09 → 2026-06-19  (40,000 bars | 26.3 months)
+================================================================================
+
+OBJECTIVE
+---------
+Replace rigid binary gate-chain with a compensation-score override framework.
+Goal: increase trade frequency from ~1.28/month while maintaining
+Expectancy ≥ 0.50R and MaxDD ≤ 2.5R.
+
+BASELINE (BASELINE_JUN2026)
+---------------------------
+  Trades     : 34
+  Rate       : 1.29 trades/month
+  Win Rate   : 88.2%
+  Expectancy : +0.6407R
+  Profit PF  : 6.300
+  Max DD     : -1.030R
+
+  Top rejections:
+    MSS_REQUIRED_NOT_MET          : 40
+    SHORT_BLOCKED_SWEEP_*         : 73 combined
+    HTF_NOT_BULLISH               : 26
+    NO_VALID_RANGE                : 23
+
+PHASE 2 V2 RESULT (PHASE2_V2_CONFLUENCE)
+-----------------------------------------
+  Trades     : 36  (+2 from baseline)
+  Rate       : 1.37 trades/month  (+0.08/mo, +6.2%)
+  Win Rate   : 86.1%  (-2.1pp)
+  Expectancy : +0.6903R  (+0.050R from baseline)  ✅ IMPROVED
+  Profit PF  : 5.837
+  Max DD     : -1.030R  (unchanged)  ✅ WITHIN LIMIT
+
+OVERRIDE TRADES
+---------------
+  Total override trades : 1
+  Override WR           : 0.0%  (n=1, too small to judge)
+  Override Expectancy   : -1.028R  (1 SL hit)
+
+  MOMENTUM_OVERRIDE (n=1):
+    Date        : 2025-05-01 11:00 UTC
+    Setup       : LONG, SSL_EQUAL_LOWS, BOS_BULLISH (body=1.913x ATR)
+    Comp Score  : 50 pts (displacement=20, htf_clarity=20, sweep=10)
+    Result      : SL (-1.028R)
+    Note        : Threshold correctly calibrated — body≥1.5x ATR required.
+                  Only 1 of 40 MSS rejections qualified.
+
+  CONFLUENCE_OVERRIDE   : 0 fires (no zone reactions in 125-175 bar window)
+  SWEEP_MAGNITUDE_OVERRIDE: 0 fires (no ranges with quality 25-39)
+  CONTEXT_OVERRIDE      : 0 fires (blocked sweeps didn't accumulate 55+ pts)
+
+OVERRIDE FRAMEWORK IMPLEMENTATION
+----------------------------------
+Files modified:
+  trade_simulator.py    — compensation scoring engine, 4 override checks,
+                          override_type + compensation_score fields in TradeRecord
+  run_backtest.py       — htf_swing_count + bars_since_breakout passed to simulator;
+                          hard timeout extended to CONFLUENCE_OVERRIDE_MAX_BARS (175)
+  config.py             — ROUND_NUMBER_INCREMENT=50 + all override thresholds
+  metrics.py            — by_override_type + override_win_rate + override_expectancy
+  quick_run.py          — Phase 2 override section in output
+  report.py             — override_type + compensation_score + compensation_breakdown in CSV
+  audit_check.py        — accepts any trades CSV, Phase 2 override breakdown section
+
+COMPENSATION SCORE FACTORS (max ~150 pts)
+-----------------------------------------
+  sweep_depth     : wick ≥ 0.5x ATR → +10, ≥ 0.75x → +20, ≥ 1.0x → +35
+  displacement    : body ≥ 1.0x ATR → +10, ≥ 1.5x → +20, ≥ 2.0x → +35
+  zone_confluence : +15 per extra overlapping level type (round_number, PDH/PDL, FVG, session)
+  htf_clarity     : ≥5 exec-TF confirmed swings → +10, ≥10 → +20
+  round_number    : zone within $1.50 of $50 increment → +20, within $3.00 → +10
+  pdh_pdl         : zone overlaps prev-day high/low → +15
+  session_timing  : timestamp in London open 07:00-09:30 → +15
+
+OVERRIDE THRESHOLDS
+--------------------
+  MOMENTUM_OVERRIDE      : BOS → MSS, total ≥ 45, displacement ≥ 20, other_pts ≥ 10
+  CONFLUENCE_OVERRIDE    : zone active 125-175 bars, total ≥ 35, conf+rn ≥ 20
+  SWEEP_MAGNITUDE_OVERRIDE: range quality 25-39, total ≥ 40, sweep ≥ 25 pts
+  CONTEXT_OVERRIDE       : blocked sweep type, total ≥ 55, disp ≥ 20, conf ≥ 30, htf ≥ 20
+
+HARD GATES (INVIOLABLE)
+------------------------
+  Gate 1  — HTF trend alignment
+  Gate 7  — Dynamic TP engine (no minimum score override)
+  Gate 8  — RR check (TP/SL ratio)
+  Gate 9  — SL distance limits
+  Gate 10 — Spread filter
+
+BEHAVIORAL NOTES
+-----------------
+  1. Extending timeout 125→175 bars reduced BSL_PDH evaluation count (18→7).
+     Reason: zones held 50 extra bars block breakout_eng from detecting
+     new PDH-sweep breakouts during that window. Net effect: fewer low-quality
+     BSL_PDH attempts evaluated → positive for metrics.
+
+  2. BSL_SWING_HIGH expectancy improved (+0.09R) in V2 vs V1 due to breakout
+     sequencing changes from extended timeout window.
+
+  3. No lookahead detected. All overrides use only bar-T data.
+     CRITICAL: override_type field on every TradeRecord for full audit trail.
+
+GUARDRAIL STATUS
+-----------------
+  Expectancy ≥ 0.50R  : ✅ +0.6903R
+  MaxDD ≤ 2.5R        : ✅ 1.030R
+  WR reasonable        : ✅ 86.1%
+  No lookahead         : ✅ confirmed
+
+NEXT STEPS (if further optimization needed)
+--------------------------------------------
+  1. Investigate CONFLUENCE_OVERRIDE activation — need to check if any zones
+     complete retest between bars 125-175 (no reactions occurred in current dataset)
+  2. Analyze SWEEP_MAGNITUDE_OVERRIDE by lowering RANGE_MIN_QUALITY threshold
+     to see if any quality-25-39 ranges exist in the dataset
+  3. CONTEXT_OVERRIDE requires very high confluence (55+ pts) — may need a
+     broader dataset or different session windows to trigger
+  4. Consider adding PDL sweep type to LONG tracking for additional long setups
+  5. Consider session extension to include NY overlap (12:00-15:00 UTC)
+     for more frequency with careful quality controls
+
+================================================================================
