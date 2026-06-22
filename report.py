@@ -63,6 +63,10 @@ def _trade_to_dict(t: TradeRecord) -> dict:
         "mfe_abs":              t.mfe_abs,
         "bars_held":            t.bars_held,
         "session":              t.session,
+        # Phase 2 adaptive override fields
+        "override_type":        getattr(t, "override_type",        "NONE"),
+        "compensation_score":   getattr(t, "compensation_score",   0.0),
+        "compensation_breakdown": getattr(t, "compensation_breakdown", ""),
     }
 
 
