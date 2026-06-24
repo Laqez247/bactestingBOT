@@ -36,6 +36,7 @@ from breakout_engine import BreakoutEngine
 from zone_engine import ZoneEngine
 from tp_engine import TPEngine
 from trade_simulator import TradeSimulator, TradeRecord
+from regime_detector import detect_regime as _detect_regime
 
 
 # ------------------------------------------------------------------
@@ -200,10 +201,25 @@ def run_single_backtest(
                     liquidity_engine=liq_eng
                 )
 
-                # Phase 2: pass htf_swing_count (exec-TF confirmed pivots as proxy)
+                # Phase 2/3: pass htf_swing_count (exec-TF confirmed pivots as proxy)
                 htf_swing_count = (len(structure_eng.swing_highs) +
                                    len(structure_eng.swing_lows))
                 bars_since_bo   = i - active_setup_bar if active_setup_bar >= 0 else 0
+
+                # Hybrid Engine Phase 3: compute HTF regime for modification gating
+                # Find the current HTF bar index (last HTF bar with timestamp <= exec bar ts)
+                try:
+                    htf_i = df_htf.index.searchsorted(ts, side="right") - 1
+                    htf_i = max(0, min(htf_i, len(df_htf) - 1))
+                    regime_info = _detect_regime(
+                        df_htf=df_htf,
+                        current_htf_idx=htf_i,
+                        lookback_bars=120,  # Iter 1: 5 days on 1H (was 60 = 2.5 days)
+                    )
+                except Exception:
+                    regime_info = {"regime": "RANGING", "htf_swing_count": 0,
+                                   "atr_ratio": 1.0, "regime_confidence": 0.0,
+                                   "trend_direction": "NONE"}
 
                 rec = sim.try_open_trade(
                     direction=direction,
@@ -222,6 +238,7 @@ def run_single_backtest(
                     iteration=iteration,
                     htf_swing_count=htf_swing_count,
                     bars_since_breakout=bars_since_bo,
+                    regime_info=regime_info,
                 )
 
                 if rec is not None:
