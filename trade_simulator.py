@@ -262,11 +262,19 @@ class TradeRecord:
     tp1_hit: bool = False
     partial_exit_price: float = 0.0
 
-    # Phase 2 adaptive override fields
+    # Phase 2 adaptive override fields (legacy — kept for backward compat)
     override_type: str = "NONE"          # NONE | MOMENTUM_OVERRIDE | CONFLUENCE_OVERRIDE |
                                           #        SWEEP_MAGNITUDE_OVERRIDE | CONTEXT_OVERRIDE
     compensation_score: float = 0.0      # total compensation score at setup evaluation
     compensation_breakdown: str = ""     # JSON-encoded per-factor scores (for audit)
+
+    # Hybrid Engine Phase 3 — modification fields
+    modification_type: str = "NONE"      # NONE | WEAK_RANGE_STRICT_ENTRY | BOS_MACRO_DISPLACEMENT |
+                                          #        STALE_RETEST_CONFLUENCE | BLOCKED_SWEEP_ELEVATED_CONTEXT |
+                                          #        LONG_PDL_RECOVERY
+    market_regime: str = ""              # TRENDING_STRONG | TRENDING_MODERATE | RANGING | HIGH_VOLATILITY
+    regime_confidence: float = 0.0       # 0.0–1.0 regime classifier confidence
+    sl_buffer_mod: float = 0.0           # any SL buffer increase applied by a modification
 
 
 # ===========================================================================
@@ -290,136 +298,156 @@ def validate_setup(
     entry_price: float,
     current_spread: float,
     cfg: dict = None,
-    # Phase 2: override context
-    comp_scores: Dict[str, float] = None,     # pre-computed compensation score dict
-    bars_since_breakout: int = 0,             # bars elapsed since zone was built
+    comp_scores: Dict[str, float] = None,
+    bars_since_breakout: int = 0,
+    # Hybrid Engine Phase 3 — regime info
+    regime_info: Dict[str, Any] = None,
+    sweep_wick_atr: float = 0.0,
+    breakout_body_atr: float = 0.0,
+    htf_swing_count: int = 0,
 ) -> tuple:
     """
-    Sequential 10-gate validation.
-    Returns (rejection_reason: str, override_type: str).
-    rejection_reason = "" means all gates passed.
-    override_type = "NONE" unless a soft gate was overridden.
+    Hybrid Engine gate validation with 5-modification layer.
 
-    Hard gates: ALWAYS enforced, cannot be overridden.
-    Soft gates: may be overridden when compensation score meets threshold.
+    Returns (rejection_reason: str, override_type: str, modification_type: str, sl_buffer_mod: float).
+      rejection_reason  = "" → all gates passed.
+      override_type     = legacy Phase 2 name (kept for metrics compatibility).
+      modification_type = Phase 3 modification name (NONE if clean pass).
+      sl_buffer_mod     = extra SL buffer ATR fraction (MOD2 adds 0.10).
 
-    Guardrail: maximum ONE override per setup. If two soft gates fail,
-    the second failure causes rejection regardless of compensation score.
+    Hard gates: ALWAYS enforced regardless of regime or modification.
+    Soft gates: ONE modification allowed per setup (two failures = reject).
+    HIGH_VOLATILITY regime: zero modifications — hard gates only.
     """
     _p = lambda k, default=None: (cfg or {}).get(k, getattr(config, k, default))
-    override_used = False
-    override_type = "NONE"
-    comp = comp_scores or {}
-    total_score = comp.get("total", 0.0)
+
+    regime      = (regime_info or {}).get("regime", "RANGING")
+    mod_allowed = _get_allowed_mods(regime)
+
+    modification_used = False
+    modification_type = "NONE"
+    override_type     = "NONE"   # legacy compat
+    sl_buffer_mod     = 0.0
+
+    comp            = comp_scores or {}
 
     # -----------------------------------------------------------------------
-    # GATE 1: HTF trend alignment  [HARD — no override]
+    # GATE 1: HTF trend alignment  [HARD — no modification]
     # -----------------------------------------------------------------------
     if _p("HIGHER_TF_FILTER_ON", True):
         if direction == "LONG" and htf_trend == "DOWNTREND":
-            return "HTF_NOT_BULLISH", "NONE"
+            return "HTF_NOT_BULLISH", "NONE", "NONE", 0.0
         if direction == "SHORT" and htf_trend == "UPTREND":
-            return "HTF_NOT_BEARISH", "NONE"
+            return "HTF_NOT_BEARISH", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 2: Valid compression range  [SOFT — SWEEP_MAGNITUDE_OVERRIDE]
+    # GATE 2: Valid compression range  [SOFT — MODIFICATION_1]
     # -----------------------------------------------------------------------
     if not range_state.valid:
-        return "NO_VALID_RANGE", "NONE"
+        return "NO_VALID_RANGE", "NONE", "NONE", 0.0
 
     range_quality = getattr(range_state, "quality_score", 0.0)
     rmq_threshold = _p("RANGE_MIN_QUALITY", 40)
 
     if range_quality < rmq_threshold:
-        # Soft gate: SWEEP_MAGNITUDE_OVERRIDE
-        # Applies when: range quality 25-39 (below threshold but not garbage)
-        # Requires: total ≥40, sweep_depth ≥25 pts, at least 1 valid touch per side
-        sweep_pts  = comp.get("sweep_depth", 0.0)
+        mod1_min = _p("MOD1_RANGE_QUALITY_MIN", 25)
+        mod1_wick = _p("MOD1_SWEEP_WICK_ATR_MIN", 0.50)
+        mod1_zones = _p("MOD1_REQUIRED_ZONE_TYPES", ["OB", "FVG"])
+        zone_type  = getattr(zone_engine.primary_zone, "zone_type", "") if zone_engine.primary_zone else ""
         touches_ok = (getattr(range_state, "touch_count_high", 0) >= 1 and
                       getattr(range_state, "touch_count_low",  0) >= 1)
 
-        can_override = (
-            not override_used
-            and range_quality >= 25
-            and total_score >= 40
-            and sweep_pts >= 25       # wick >= 0.75x ATR
+        can_mod = (
+            not modification_used
+            and "MODIFICATION_1" in mod_allowed
+            and range_quality >= mod1_min
+            and sweep_wick_atr >= mod1_wick
+            and zone_type in mod1_zones
             and touches_ok
         )
-        if can_override:
-            override_used = True
-            override_type = "SWEEP_MAGNITUDE_OVERRIDE"
+        if can_mod:
+            modification_used = True
+            modification_type = "WEAK_RANGE_STRICT_ENTRY"
+            override_type     = "SWEEP_MAGNITUDE_OVERRIDE"   # legacy compat
         else:
-            return "RANGE_QUALITY_TOO_LOW", "NONE"
+            return "RANGE_QUALITY_TOO_LOW", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 3: Correct liquidity sweep direction
+    # GATE 3: Correct liquidity sweep direction  [HARD direction check]
     # -----------------------------------------------------------------------
     if direction == "LONG":
-        if breakout_event is None or not str(breakout_event.sweep_type).startswith("SSL_"):
-            return "NO_SSL_SWEEP", "NONE"
+        if breakout_event is None or not str(getattr(breakout_event, "sweep_type", "")).startswith("SSL_"):
+            return "NO_SSL_SWEEP", "NONE", "NONE", 0.0
     else:
-        if breakout_event is None or not str(breakout_event.sweep_type).startswith("BSL_"):
-            return "NO_BSL_SWEEP", "NONE"
+        if breakout_event is None or not str(getattr(breakout_event, "sweep_type", "")).startswith("BSL_"):
+            return "NO_BSL_SWEEP", "NONE", "NONE", 0.0
 
-    # Gate 3b: SHORT sweep quality filter  [SOFT — CONTEXT_OVERRIDE]
+    sweep_type = getattr(breakout_event, "sweep_type", "") if breakout_event else ""
+
+    # Gate 3b/3c: Blocked sweep types  [SOFT — MODIFICATION_4 for SHORT; MODIFICATION_4/5 for LONG]
     if direction == "SHORT":
         blocked = _p("SHORT_BLOCKED_SWEEPS", [])
-        sweep_type = getattr(breakout_event, "sweep_type", "")
         if blocked and sweep_type in blocked:
-            # CONTEXT_OVERRIDE — highest threshold, most protected gate
-            # Requires: total ≥55, displacement ≥20 pts (body ≥1.5x ATR),
-            #           zone_confluence ≥30 pts (2+ extra types),
-            #           htf_clarity ≥20 pts (5-swing sequence)
-            disp_pts    = comp.get("displacement",    0.0)
-            conf_pts    = comp.get("zone_confluence", 0.0)
-            htf_pts     = comp.get("htf_clarity",     0.0)
-
-            can_override = (
-                not override_used
-                and total_score >= 55
-                and disp_pts >= 20     # body >= 1.5x ATR
-                and conf_pts >= 30     # 2+ extra confluence types
-                and htf_pts  >= 20     # 5-swing sequence
+            can_mod = _check_mod4(
+                modification_used, mod_allowed, direction, sweep_type,
+                sweep_wick_atr, breakout_body_atr, htf_swing_count,
+                zone_engine, _p
             )
-            if can_override:
-                override_used = True
-                override_type = "CONTEXT_OVERRIDE"
+            if can_mod:
+                modification_used = True
+                modification_type = "BLOCKED_SWEEP_ELEVATED_CONTEXT"
+                override_type     = "CONTEXT_OVERRIDE"
             else:
-                return f"SHORT_BLOCKED_SWEEP_{sweep_type}", "NONE"
+                return f"SHORT_BLOCKED_SWEEP_{sweep_type}", "NONE", "NONE", 0.0
 
-    # Gate 3c: LONG sweep quality filter  [SOFT — CONTEXT_OVERRIDE]
     if direction == "LONG":
         blocked = _p("LONG_BLOCKED_SWEEPS", [])
-        sweep_type = getattr(breakout_event, "sweep_type", "")
-        if blocked and sweep_type in blocked:
-            disp_pts    = comp.get("displacement",    0.0)
-            conf_pts    = comp.get("zone_confluence", 0.0)
-            htf_pts     = comp.get("htf_clarity",     0.0)
+        never_unlock = _p("MOD4_NEVER_UNLOCK_LONG", ["SSL_SESSION_LOW", "SSL_RANGE_LOW"])
 
-            can_override = (
-                not override_used
-                and total_score >= 55
-                and disp_pts >= 20
-                and conf_pts >= 30
-                and htf_pts  >= 20
+        if blocked and sweep_type in blocked:
+            # Zero-WR types: never unlockable
+            if sweep_type in never_unlock:
+                return f"LONG_BLOCKED_SWEEP_{sweep_type}", "NONE", "NONE", 0.0
+
+            can_mod = _check_mod4(
+                modification_used, mod_allowed, direction, sweep_type,
+                sweep_wick_atr, breakout_body_atr, htf_swing_count,
+                zone_engine, _p
             )
-            if can_override:
-                override_used = True
-                override_type = "CONTEXT_OVERRIDE"
+            if can_mod:
+                modification_used = True
+                modification_type = "BLOCKED_SWEEP_ELEVATED_CONTEXT"
+                override_type     = "CONTEXT_OVERRIDE"
             else:
-                return f"LONG_BLOCKED_SWEEP_{sweep_type}", "NONE"
+                return f"LONG_BLOCKED_SWEEP_{sweep_type}", "NONE", "NONE", 0.0
+
+        # Gate 3d: MODIFICATION_5 — LONG_PDL_RECOVERY (SSL_PDL in trending strong)
+        elif (not modification_used
+              and sweep_type == _p("MOD5_SWEEP_TYPE", "SSL_PDL")
+              and "MODIFICATION_5" in mod_allowed):
+            mod5_wick  = _p("MOD5_SWEEP_WICK_ATR_MIN", 0.40)
+            mod5_zones = _p("MOD5_REQUIRED_ZONE_TYPES", ["OB"])
+            zone_type  = getattr(zone_engine.primary_zone, "zone_type", "") if zone_engine.primary_zone else ""
+            entry_mode = _p("ENTRY_MODE", "MODE_CLOSE_OUTSIDE")
+
+            if (sweep_wick_atr >= mod5_wick
+                    and zone_type in mod5_zones
+                    and entry_mode == _p("MOD5_ENTRY_MODE", "MODE_WICK_REJECTION")):
+                modification_used = True
+                modification_type = "LONG_PDL_RECOVERY"
+                override_type     = "CONTEXT_OVERRIDE"
 
     # -----------------------------------------------------------------------
-    # GATE 4: Structure break confirmed
+    # GATE 4: Structure break confirmed  [HARD direction check]
     # -----------------------------------------------------------------------
     if breakout_event is None:
-        return "NO_BULLISH_MSS_BOS" if direction == "LONG" else "NO_BEARISH_MSS_BOS", "NONE"
+        return ("NO_BULLISH_MSS_BOS" if direction == "LONG" else "NO_BEARISH_MSS_BOS"), "NONE", "NONE", 0.0
     if direction == "LONG" and breakout_event.direction != "LONG":
-        return "NO_BULLISH_MSS_BOS", "NONE"
+        return "NO_BULLISH_MSS_BOS", "NONE", "NONE", 0.0
     if direction == "SHORT" and breakout_event.direction != "SHORT":
-        return "NO_BEARISH_MSS_BOS", "NONE"
+        return "NO_BEARISH_MSS_BOS", "NONE", "NONE", 0.0
 
-    # Gate 4b: Directional MSS_REQUIRED filter  [SOFT — MOMENTUM_OVERRIDE]
+    # Gate 4b: MSS requirement  [SOFT — MODIFICATION_2]
     if direction == "LONG":
         mss_needed = _p("MSS_REQUIRED_LONG", _p("MSS_REQUIRED", False))
     else:
@@ -427,96 +455,128 @@ def validate_setup(
 
     if mss_needed:
         needed = "MSS_BULLISH" if direction == "LONG" else "MSS_BEARISH"
-        if breakout_event.structure_type != needed:
-            # MOMENTUM_OVERRIDE: BOS so violent it behaves like MSS
-            # Requires: total ≥45, displacement ≥20 pts (body ≥1.5x ATR),
-            #           at least one other factor contributing
-            disp_pts   = comp.get("displacement", 0.0)
-            other_pts  = total_score - disp_pts
+        if getattr(breakout_event, "structure_type", "") != needed:
+            mod2_body  = _p("MOD2_BODY_ATR_MIN", 1.5)
+            mod2_swings= _p("MOD2_HTF_SWING_COUNT_MIN", 5)
+            mod2_zones = _p("MOD2_REQUIRED_ZONE_TYPES", ["OB", "BB"])
+            zone_type  = getattr(zone_engine.primary_zone, "zone_type", "") if zone_engine.primary_zone else ""
 
-            can_override = (
-                not override_used
-                and total_score >= 45
-                and disp_pts >= 20     # body >= 1.5x ATR — minimum for momentum
-                and other_pts >= 10    # at least one other compensating factor
+            can_mod = (
+                not modification_used
+                and "MODIFICATION_2" in mod_allowed
+                and breakout_body_atr >= mod2_body
+                and htf_swing_count >= mod2_swings
+                and zone_type in mod2_zones
             )
-            if can_override:
-                override_used = True
-                override_type = "MOMENTUM_OVERRIDE"
+            if can_mod:
+                modification_used = True
+                modification_type = "BOS_MACRO_DISPLACEMENT"
+                override_type     = "MOMENTUM_OVERRIDE"
+                sl_buffer_mod     = _p("MOD2_SL_BUFFER_INCREASE", 0.10)
             else:
-                return "MSS_REQUIRED_NOT_MET", "NONE"
+                return "MSS_REQUIRED_NOT_MET", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 5: Valid retest zone exists  [effectively checked via timeout logic]
+    # GATE 5: Valid retest zone  [SOFT — MODIFICATION_3 for stale retests]
     # -----------------------------------------------------------------------
     if not zone_engine.has_valid_zone:
-        return "NO_RETEST_ZONE", "NONE"
+        return "NO_RETEST_ZONE", "NONE", "NONE", 0.0
 
-    # Gate 5b: RETEST_TIMEOUT extension via CONFLUENCE_OVERRIDE
-    # The timeout is enforced in run_backtest.py. Here we handle the edge case
-    # where bars_since_breakout is passed in and exceeds the base timeout.
     base_timeout   = _p("RETEST_TIMEOUT_BARS", 125)
-    extend_timeout = 175  # absolute maximum even with override
+    mod3_max_bars  = _p("MOD3_MAX_BARS", 175)
 
     if bars_since_breakout > base_timeout:
-        # We're in the extended window (base_timeout+1 to 175)
-        if bars_since_breakout <= extend_timeout:
-            # CONFLUENCE_OVERRIDE: zone remains valid due to exceptional confluence
-            # Requires: total ≥35, zone_confluence + round_number ≥20 pts
-            conf_rn_pts = comp.get("zone_confluence", 0.0) + comp.get("round_number", 0.0)
+        if bars_since_breakout <= mod3_max_bars:
+            # MODIFICATION_3: stale retest allowed with ≥2 confluence types
+            min_conf = _p("MOD3_MIN_CONFLUENCE_TYPES", 2)
+            conf_types = comp.get("_extra_confluence_count", 0)
+            # Fall back to zone_confluence pts (15 per type) if count not passed
+            if conf_types == 0:
+                conf_types = int(comp.get("zone_confluence", 0.0) / 15.0)
 
-            can_override = (
-                not override_used
-                and total_score >= 35
-                and conf_rn_pts >= 20
+            can_mod = (
+                not modification_used
+                and "MODIFICATION_3" in mod_allowed
+                and conf_types >= min_conf
             )
-            if can_override:
-                override_used = True
-                override_type = "CONFLUENCE_OVERRIDE"
+            if can_mod:
+                modification_used = True
+                modification_type = "STALE_RETEST_CONFLUENCE"
+                override_type     = "CONFLUENCE_OVERRIDE"
             else:
-                return "RETEST_TIMEOUT_EXCEEDED", "NONE"
+                return "RETEST_TIMEOUT_EXCEEDED", "NONE", "NONE", 0.0
         else:
-            return "RETEST_TIMEOUT_EXCEEDED", "NONE"
+            return "RETEST_TIMEOUT_EXCEEDED", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 6: Zone reaction confirmed
+    # GATE 6: Zone reaction confirmed  [HARD — no modification]
     # -----------------------------------------------------------------------
     if not zone_reaction:
-        return "NO_ZONE_REACTION", "NONE"
+        return "NO_ZONE_REACTION", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 7: Valid dynamic TP target  [HARD — no override]
+    # GATE 7: Valid dynamic TP target  [HARD]
     # -----------------------------------------------------------------------
-    tp_min_score = _p("TP_MIN_SCORE", 30)
+    tp_min_score = _p("TP_MIN_SCORE", 20)
     if best_tp_score < tp_min_score:
-        return "NO_VALID_TARGET", "NONE"
+        return "NO_VALID_TARGET", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 8: RR check  [HARD — no override]
+    # GATE 8: RR check  [HARD]
     # -----------------------------------------------------------------------
-    tp_min_rr = _p("TP_MIN_RR", 1.0)
-    if best_rr < tp_min_rr:
-        return "RR_TOO_LOW", "NONE"
+    if best_rr < _p("TP_MIN_RR", 1.0):
+        return "RR_TOO_LOW", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 9: SL distance  [HARD — no override]
+    # GATE 9: SL distance  [HARD]
     # -----------------------------------------------------------------------
-    sl_max_dist_atr = _p("SL_MAX_DISTANCE_ATR", 2.0)
-    sl_min_dist_abs = _p("SL_MIN_DISTANCE_ABS", 0.30)
     sl_dist = abs(entry_price - sl_price)
-    if sl_dist > sl_max_dist_atr * atr_val:
-        return "SL_TOO_WIDE", "NONE"
-    if sl_dist < sl_min_dist_abs:
-        pass  # adjust handled in try_open_trade
+    if sl_dist > _p("SL_MAX_DISTANCE_ATR", 2.5) * atr_val:
+        return "SL_TOO_WIDE", "NONE", "NONE", 0.0
 
     # -----------------------------------------------------------------------
-    # GATE 10: Spread filter  [HARD — no override]
+    # GATE 10: Spread filter  [HARD]
     # -----------------------------------------------------------------------
-    spread_max = _p("SPREAD_FILTER_MAX", 1.00)
-    if current_spread > spread_max:
-        return "SPREAD_TOO_HIGH", "NONE"
+    if current_spread > _p("SPREAD_FILTER_MAX", 2.00):
+        return "SPREAD_TOO_HIGH", "NONE", "NONE", 0.0
 
-    return "", override_type
+    return "", override_type, modification_type, sl_buffer_mod
+
+
+# ---------------------------------------------------------------------------
+# MODIFICATION HELPER FUNCTIONS
+# ---------------------------------------------------------------------------
+
+def _get_allowed_mods(regime: str) -> list:
+    """Return list of allowed modification ids for the given regime."""
+    from regime_detector import regime_allows_modifications
+    return regime_allows_modifications(regime)
+
+
+def _check_mod4(modification_used, mod_allowed, direction, sweep_type,
+                sweep_wick_atr, breakout_body_atr, htf_swing_count,
+                zone_engine, _p) -> bool:
+    """
+    Check whether MODIFICATION_4 (BLOCKED_SWEEP_ELEVATED_CONTEXT) can fire.
+    Returns True if the modification is approved.
+    """
+    if modification_used:
+        return False
+    if "MODIFICATION_4" not in mod_allowed:
+        return False
+
+    mod4_wick   = _p("MOD4_SWEEP_WICK_ATR_MIN", 0.75)
+    mod4_body   = _p("MOD4_BODY_ATR_MIN", 1.2)
+    mod4_zones  = _p("MOD4_REQUIRED_ZONE_TYPES", ["OB"])
+    mod4_swings = _p("MOD4_HTF_SWING_COUNT_MIN", 5)
+    zone_type   = getattr(zone_engine.primary_zone, "zone_type", "") if zone_engine.primary_zone else ""
+
+    return (
+        sweep_wick_atr   >= mod4_wick
+        and breakout_body_atr >= mod4_body
+        and zone_type        in mod4_zones
+        and htf_swing_count  >= mod4_swings
+    )
 
 
 # ===========================================================================
@@ -560,6 +620,8 @@ class TradeSimulator:
         # Phase 2: additional context for compensation scoring
         htf_swing_count: int = 0,
         bars_since_breakout: int = 0,
+        # Hybrid Engine Phase 3: regime info from regime_detector
+        regime_info: Dict[str, Any] = None,
     ) -> Optional[TradeRecord]:
         """
         Attempt to open a trade. Runs 10-gate validation + override checks.
@@ -652,9 +714,9 @@ class TradeSimulator:
         )
 
         # ----------------------------------------------------------------
-        # Run gate validation with override context
+        # Run gate validation with Hybrid Engine modification layer
         # ----------------------------------------------------------------
-        rejection, override_type = validate_setup(
+        rejection, override_type, modification_type, sl_buffer_mod = validate_setup(
             direction=direction,
             i=i,
             df=df,
@@ -673,7 +735,19 @@ class TradeSimulator:
             cfg=self.cfg,
             comp_scores=comp_scores,
             bars_since_breakout=bars_since_breakout,
+            regime_info=regime_info,
+            sweep_wick_atr=sweep_wick_atr,
+            breakout_body_atr=breakout_body_atr,
+            htf_swing_count=htf_swing_count,
         )
+
+        # Apply MOD2 SL buffer increase if applicable
+        if sl_buffer_mod > 0 and not rejection:
+            extra = sl_buffer_mod * atr_val
+            if direction == "LONG":
+                sl_price -= extra
+            else:
+                sl_price += extra
 
         self._setup_counter += 1
         setup_id = f"SETUP_{self._setup_counter:05d}"
@@ -707,8 +781,9 @@ class TradeSimulator:
             sweep_wick_size_abs=round(sweep_wick_abs, 3),
 
             structure_break_type=(
-                "BOS_MOMENTUM_OVERRIDE" if override_type == "MOMENTUM_OVERRIDE"
-                else (breakout_event.structure_type if breakout_event else "")
+                "BOS_MACRO_DISPLACEMENT" if modification_type == "BOS_MACRO_DISPLACEMENT"
+                else ("BOS_MOMENTUM_OVERRIDE" if override_type == "MOMENTUM_OVERRIDE"
+                      else (breakout_event.structure_type if breakout_event else ""))
             ),
             breakout_bar=breakout_event.breakout_bar if breakout_event else -1,
             breakout_direction=breakout_event.direction if breakout_event else "",
@@ -718,8 +793,9 @@ class TradeSimulator:
             htf_trend=htf_trend,
 
             retest_zone_type=(
-                "ZONE_CONFLUENCE_EXTENDED" if override_type == "CONFLUENCE_OVERRIDE"
-                else (zone.zone_type if zone else "")
+                "ZONE_STALE_RETEST" if modification_type == "STALE_RETEST_CONFLUENCE"
+                else ("ZONE_CONFLUENCE_EXTENDED" if override_type == "CONFLUENCE_OVERRIDE"
+                      else (zone.zone_type if zone else ""))
             ),
             retest_zone_top=round(zone.top, 2) if zone else 0.0,
             retest_zone_bottom=round(zone.bottom, 2) if zone else 0.0,
@@ -742,6 +818,12 @@ class TradeSimulator:
             override_type=override_type,
             compensation_score=round(comp_scores.get("total", 0.0), 1),
             compensation_breakdown=comp_str,
+
+            # Hybrid Engine Phase 3 fields
+            modification_type=modification_type,
+            market_regime=(regime_info or {}).get("regime", ""),
+            regime_confidence=round((regime_info or {}).get("regime_confidence", 0.0), 3),
+            sl_buffer_mod=round(sl_buffer_mod, 4),
         )
 
         if rejection:
