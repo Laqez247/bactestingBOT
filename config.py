@@ -14,8 +14,8 @@ DATA_SOURCE = "twelvedata"
 # ===========================================================
 # DATE RANGE
 # ===========================================================
-BACKTEST_START = "2024-04-09"
-BACKTEST_END   = "2026-06-19"
+BACKTEST_START = "2024-01-01"
+BACKTEST_END   = "2026-5-31"
 WALK_FORWARD_SPLIT = 0.70      # 70% in-sample, 30% out-of-sample
 
 # ===========================================================
@@ -77,24 +77,67 @@ ASIAN_SESSION_CLOSE = "07:00"
 OFF_HOURS_OPEN      = "17:00"
 
 # ===========================================================
-# PHASE 2 ADAPTIVE OVERRIDE FRAMEWORK
+# PHASE 2 ADAPTIVE OVERRIDE FRAMEWORK (legacy names kept for compatibility)
 # ===========================================================
 # Round-number increment for XAUUSD ($50 levels = 2500, 2550, 2600 …)
 ROUND_NUMBER_INCREMENT = 50
 
-# Override thresholds — see trade_simulator.py for scoring factors
-MOMENTUM_OVERRIDE_MIN_SCORE         = 45   # min total comp score for BOS→MSS override
-MOMENTUM_OVERRIDE_MIN_DISPLACEMENT  = 20   # min displacement pts (body ≥ 1.5x ATR)
-CONFLUENCE_OVERRIDE_MIN_SCORE       = 35   # min total score for timeout extension
-CONFLUENCE_OVERRIDE_MIN_CONF_RN     = 20   # min confluence+round_number pts
-SWEEP_MAG_OVERRIDE_MIN_SCORE        = 40   # min total score for range quality bypass
-SWEEP_MAG_OVERRIDE_MIN_SWEEP        = 25   # min sweep_depth pts (wick ≥ 0.75x ATR)
-SWEEP_MAG_OVERRIDE_MIN_RANGE_QUAL   = 25   # absolute minimum range quality (never below)
-CONTEXT_OVERRIDE_MIN_SCORE          = 55   # min total score for blocked-sweep override
-CONTEXT_OVERRIDE_MIN_DISPLACEMENT   = 20   # displacement ≥ 1.5x ATR
-CONTEXT_OVERRIDE_MIN_CONFLUENCE     = 30   # zone_confluence ≥ 2 extra types
-CONTEXT_OVERRIDE_MIN_HTF            = 20   # htf_clarity ≥ 5-swing sequence
-CONFLUENCE_OVERRIDE_MAX_BARS        = 175  # absolute maximum bars even with override
+# Legacy override thresholds (kept for backward-compat; Hybrid Engine uses MOD_* below)
+MOMENTUM_OVERRIDE_MIN_SCORE         = 45
+MOMENTUM_OVERRIDE_MIN_DISPLACEMENT  = 20
+CONFLUENCE_OVERRIDE_MIN_SCORE       = 35
+CONFLUENCE_OVERRIDE_MIN_CONF_RN     = 20
+SWEEP_MAG_OVERRIDE_MIN_SCORE        = 40
+SWEEP_MAG_OVERRIDE_MIN_SWEEP        = 25
+SWEEP_MAG_OVERRIDE_MIN_RANGE_QUAL   = 25
+CONTEXT_OVERRIDE_MIN_SCORE          = 55
+CONTEXT_OVERRIDE_MIN_DISPLACEMENT   = 20
+CONTEXT_OVERRIDE_MIN_CONFLUENCE     = 30
+CONTEXT_OVERRIDE_MIN_HTF            = 20
+CONFLUENCE_OVERRIDE_MAX_BARS        = 175
+
+# ===========================================================
+# HYBRID ENGINE — SETUP MODIFICATION LAYER (Phase 3)
+# ===========================================================
+# Each modification has its own threshold set.
+# These thresholds are deliberately lower than the Phase 2 override thresholds
+# because the regime detector acts as the outer guard — modifications only fire
+# when the regime justifies them.
+
+# MODIFICATION 1 — WEAK_RANGE_STRICT_ENTRY
+# Triggers: range_quality 25–39 AND regime TRENDING_STRONG or TRENDING_MODERATE
+MOD1_RANGE_QUALITY_MIN      = 25    # absolute floor — never below
+MOD1_RANGE_QUALITY_MAX      = 39    # gate threshold is 40; this is the soft window
+MOD1_SWEEP_WICK_ATR_MIN     = 0.50  # wick must be > 0.50x ATR
+MOD1_REQUIRED_ZONE_TYPES    = ["OB", "FVG"]   # no SR fallback
+
+# MODIFICATION 2 — BOS_MACRO_DISPLACEMENT
+# Triggers: structure_break = BOS (not MSS) AND regime TRENDING_STRONG only
+MOD2_BODY_ATR_MIN           = 1.0   # Iter 2: lowered from 1.5 (0/26 MSS rejections meet 1.5; 9/26 meet 1.0)
+MOD2_HTF_SWING_COUNT_MIN    = 5     # need strong macro trend (≥5 qualifying swings)
+MOD2_REQUIRED_ZONE_TYPES    = ["OB", "BB"]   # highest-quality zones only
+MOD2_SL_BUFFER_INCREASE     = 0.10  # add 0.10 ATR to SL buffer for BOS trades
+
+# MODIFICATION 3 — STALE_RETEST_CONFLUENCE
+# Triggers: retest bars > RETEST_TIMEOUT_BARS AND < MOD3_MAX_BARS AND regime not HV
+MOD3_MAX_BARS               = 175   # hard outer limit
+MOD3_MIN_CONFLUENCE_TYPES   = 2     # zone must overlap ≥2 reference level types
+
+# MODIFICATION 4 — BLOCKED_SWEEP_ELEVATED_CONTEXT
+# Triggers: sweep type in blocked list (but NOT the zero-WR types) AND regime TRENDING_STRONG
+MOD4_SWEEP_WICK_ATR_MIN     = 0.30  # Iter 2: lowered from 0.50 (median wick=0.430, >=0.30 captures ~55%)
+MOD4_BODY_ATR_MIN           = 0.50  # Iter 2: lowered from 1.0 (body median=0.613, >=0.50 captures majority)
+MOD4_REQUIRED_ZONE_TYPES    = ["OB", "BB"]  # covers 61/62 blocked sweep rejections
+MOD4_HTF_SWING_COUNT_MIN    = 3
+# Zero-WR sweep types that can NEVER be unlocked by any modification
+MOD4_NEVER_UNLOCK_LONG      = ["SSL_SESSION_LOW", "SSL_RANGE_LOW"]
+
+# MODIFICATION 5 — LONG_PDL_RECOVERY
+# Triggers: direction=LONG AND sweep=SSL_PDL AND regime TRENDING_STRONG
+MOD5_SWEEP_TYPE             = "SSL_PDL"
+MOD5_SWEEP_WICK_ATR_MIN     = 0.40
+MOD5_REQUIRED_ZONE_TYPES    = ["OB"]
+MOD5_ENTRY_MODE             = "MODE_WICK_REJECTION"
 
 # ===========================================================
 # LIQUIDITY GRAB (SWEEP)
