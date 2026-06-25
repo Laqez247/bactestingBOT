@@ -29,6 +29,7 @@ class RangeState:
     touch_count_low: int = 0
     formed_in_asian: bool = False
     height_atr: float = 0.0
+    is_fallback: bool = False     # True when detected by secondary low-threshold scan
 
 
 class RangeEngine:
@@ -103,10 +104,12 @@ class RangeEngine:
             return True
         return False
 
-    def _scan_for_range(self, current_bar: int) -> Optional[RangeState]:
+    def _scan_for_range(self, current_bar: int,
+                        min_quality_override: Optional[float] = None) -> Optional[RangeState]:
         """
         Dense window scan — every 5 bars from RANGE_MIN_BARS to RANGE_MAX_BARS.
         Finds the highest-quality range ending at or near current_bar.
+        Pass min_quality_override to run the fallback low-threshold scan.
         """
         max_bars   = self._p("RANGE_MAX_BARS", 150)
         min_bars   = self._p("RANGE_MIN_BARS", 8)
@@ -114,7 +117,7 @@ class RangeEngine:
         proximity  = self._p("RANGE_TOUCH_PROXIMITY", 0.35)
         min_h_atr  = self._p("RANGE_MIN_HEIGHT_ATR", 0.25)
         max_h_atr  = self._p("RANGE_MAX_HEIGHT_ATR", 5.0)
-        min_quality = self._p("RANGE_MIN_QUALITY", 30)
+        min_quality = min_quality_override if min_quality_override is not None else self._p("RANGE_MIN_QUALITY", 30)
 
         atr_val = self._atrs[current_bar]
         if pd.isna(atr_val):
