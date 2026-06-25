@@ -387,7 +387,11 @@ def validate_setup(
     # Gate 3b/3c: Blocked sweep types  [SOFT — MODIFICATION_4 for SHORT; MODIFICATION_4/5 for LONG]
     if direction == "SHORT":
         blocked = _p("SHORT_BLOCKED_SWEEPS", [])
+        never_unlock_short = _p("MOD4_NEVER_UNLOCK_SHORT", [])
         if blocked and sweep_type in blocked:
+            # Zero-WR types: never unlockable (e.g. BSL_PDH: 0% WR, -1.025R)
+            if sweep_type in never_unlock_short:
+                return f"SHORT_BLOCKED_SWEEP_{sweep_type}", "NONE", "NONE", 0.0
             can_mod = _check_mod4(
                 modification_used, mod_allowed, direction, sweep_type,
                 sweep_wick_atr, breakout_body_atr, htf_swing_count,
