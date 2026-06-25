@@ -235,8 +235,9 @@ def detect_regime(
     bullish_swings, bearish_swings, direction = _count_trending_swings(swing_highs, swing_lows)
     htf_swing_count = max(bullish_swings, bearish_swings)
 
-    # TRENDING_STRONG: 5+ qualifying swings + no violent counter-trend candles
-    if htf_swing_count >= 5:
+    # TRENDING_STRONG: 4+ qualifying swings + no violent counter-trend candles
+    # Phase3: lowered from 5 → 4 (XAUUSD 1H rarely produces 5 clean swings in 5 days)
+    if htf_swing_count >= 4:
         no_counter_trend = _check_counter_trend_candles(
             df_slice, direction, current_atr, lookback=10, max_mult=_HV_CANDLE_MULT
         )
