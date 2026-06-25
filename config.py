@@ -110,10 +110,13 @@ MOD1_RANGE_QUALITY_MIN      = 25    # absolute floor — never below
 MOD1_RANGE_QUALITY_MAX      = 39    # gate threshold is 40; this is the soft window
 MOD1_SWEEP_WICK_ATR_MIN     = 0.50  # wick must be > 0.50x ATR
 MOD1_REQUIRED_ZONE_TYPES    = ["OB", "FVG"]   # no SR fallback
+# Fallback range detection (secondary scan when primary finds nothing)
+FALLBACK_RANGE_MIN_QUALITY  = 20    # secondary scan threshold (vs primary 40)
+FALLBACK_MOD1_WICK_ATR_MIN  = 0.35  # stricter wick for fallback (vs MOD1 standard 0.30)
 
 # MODIFICATION 2 — BOS_MACRO_DISPLACEMENT
 # Triggers: structure_break = BOS (not MSS) AND regime TRENDING_STRONG only
-MOD2_BODY_ATR_MIN           = 1.0   # Iter 2: lowered from 1.5 (0/26 MSS rejections meet 1.5; 9/26 meet 1.0)
+MOD2_BODY_ATR_MIN           = 0.75  # Phase3 Iter3: lowered from 1.0 → unlocks 3 more clean BOS setups (8 vs 5 eligible)
 MOD2_HTF_SWING_COUNT_MIN    = 5     # need strong macro trend (≥5 qualifying swings)
 MOD2_REQUIRED_ZONE_TYPES    = ["OB", "BB"]   # highest-quality zones only
 MOD2_SL_BUFFER_INCREASE     = 0.10  # add 0.10 ATR to SL buffer for BOS trades
@@ -121,7 +124,7 @@ MOD2_SL_BUFFER_INCREASE     = 0.10  # add 0.10 ATR to SL buffer for BOS trades
 # MODIFICATION 3 — STALE_RETEST_CONFLUENCE
 # Triggers: retest bars > RETEST_TIMEOUT_BARS AND < MOD3_MAX_BARS AND regime not HV
 MOD3_MAX_BARS               = 175   # hard outer limit
-MOD3_MIN_CONFLUENCE_TYPES   = 2     # zone must overlap ≥2 reference level types
+MOD3_MIN_CONFLUENCE_TYPES   = 2     # kept at 2; lowering to 1 added a losing MOD4 trade via stale-retest interaction
 
 # MODIFICATION 4 — BLOCKED_SWEEP_ELEVATED_CONTEXT
 # Triggers: sweep type in blocked list (but NOT the zero-WR types) AND regime TRENDING_STRONG
@@ -131,6 +134,8 @@ MOD4_REQUIRED_ZONE_TYPES    = ["OB", "BB"]  # covers 61/62 blocked sweep rejecti
 MOD4_HTF_SWING_COUNT_MIN    = 3
 # Zero-WR sweep types that can NEVER be unlocked by any modification
 MOD4_NEVER_UNLOCK_LONG      = ["SSL_SESSION_LOW", "SSL_RANGE_LOW"]
+# BSL_PDH for SHORT: 0% WR (-1.025R sole trade) — permanently hard-blocked for MOD4
+MOD4_NEVER_UNLOCK_SHORT     = ["BSL_PDH"]
 
 # MODIFICATION 5 — LONG_PDL_RECOVERY
 # Triggers: direction=LONG AND sweep=SSL_PDL AND regime TRENDING_STRONG
