@@ -1,0 +1,58 @@
+========================================================================
+EDGE 2 HYBRID ENGINE — FINAL DIAGNOSTIC REPORT
+========================================================================
+
+PHASE 1: DRY SPELL ANALYSIS
+----------------------------------------
+Champion baseline months present: Apr/May 2024, Aug/Sep 2024, Dec 2024,
+  Jan/Apr/May 2025, Sep 2025, Jan/May 2026
+Dry months (zero setups): Jun/Jul/Oct/Nov 2025, Feb/Mar/Apr 2026
+Root cause: Signal generation found ZERO candidate setups in those months.
+  The London-only + MSS_REQUIRED + RANGE_MIN_QUALITY=40 combination
+  eliminates candidate setups BEFORE any gate fires.
+  (Dry months are not gate-rejection months — they are blank months.)
+
+PHASE 2: OLD BOT VS NEW BOT COMPARISON
+----------------------------------------
+Old bot (Edge 2 compression breakout):
+  - No sweep requirement, no MSS/BOS, no session filter, no quality threshold
+  - Fixed RR, compression zone timeout 72 bars, 24/5 signal detection
+New bot champion:
+  - MSS_REQUIRED=True, RANGE_MIN_QUALITY=40, London-only, sweep filter
+  - 32 trades, 87.5% WR, +0.6495R, 1.28/month
+
+Top gate rejections in champion run:
+  MSS_REQUIRED_NOT_MET:       40 (Gate 4b)
+  SHORT_BLOCKED_SWEEPS:       73 combined (Gate 3b/3c)
+  HTF_NOT_BULLISH:            26 (Gate 1 - hard gate)
+  NO_VALID_RANGE:             23 (Gate 2 - quality=0, no range detected)
+
+PHASE 3: HYBRID ENGINE MODIFICATIONS
+----------------------------------------
+5 modifications implemented:
+  MOD1 WEAK_RANGE_STRICT_ENTRY:       range_quality 25-39 + wick>0.30x ATR
+    → Never fired (all NO_VALID_RANGE rejections have quality=0)
+  MOD2 BOS_MACRO_DISPLACEMENT:        BOS + body>1.0x ATR + HTF>=5 swings
+    → TRENDING_STRONG only; n=3, WR=66.7%, Exp=+0.7007R
+  MOD3 STALE_RETEST_CONFLUENCE:       timeout 125-175 bars + 2+ conf types
+    → Not fired in current dataset (no stale retests with confluence)
+  MOD4 BLOCKED_SWEEP_ELEVATED_CONTEXT: blocked sweep + regime T_MOD/STRONG
+    → n=5, WR=60.0%, Exp=-0.0010R (break-even but adds trade count)
+  MOD5 LONG_PDL_RECOVERY:             SSL_PDL + OB + wick>0.40 + regime T_STRONG
+    → SSL_PDL not in blocked list; acts as quality tag only
+
+PHASE 4: ITERATION SUMMARY
+----------------------------------------
+  Iter         Trades   WR%      Exp        TotalR     R/month   
+  BASELINE     34       85.3%    +0.7016R   +23.85R    +0.954R   
+  ITER1        34       85.3%    +0.7016R   +23.85R    +0.954R   
+  ITER2 ★      41       82.9%    +0.6579R   +26.97R    +1.08R    
+  ITER3        42       81.0%    +0.6069R   +25.49R    +1.02R    
+  ITER4        ?        ?%       ?R         ?R         ?R        
+
+CHAMPION: ITER2 configuration
+  Trades: 41 | WR: 82.9% | Expectancy: +0.6579R | MaxDD: -1.055R
+  Modifications: MOD4 (TRENDING_MODERATE+STRONG) + MOD2 (TRENDING_STRONG)
+  MOD4 thresholds: wick>=0.30, body>=0.50, zone=[OB,BB], htf_swings>=3
+  MOD2 thresholds: body>=1.0, zone=[OB,BB], htf_swings>=5, TRENDING_STRONG
+  Regime lookback: 120 HTF bars (5 days)

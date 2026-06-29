@@ -1,0 +1,81 @@
+======================================================================
+EDGE 2 BACKTEST SUMMARY — ITERATION 0
+======================================================================
+Label: BASELINE
+
+  Total setups found   : 418
+  Setups rejected      : 379
+  Trades taken         : 39
+  Win rate             : 66.7%
+  Loss rate            : 33.3%
+  Expectancy (R)       : +0.2267
+  Profit factor        : 1.6672
+  Max drawdown (R)     : -6.1410
+  Avg R win            : +0.8497
+  Avg R loss           : -1.0193
+  Longest win streak   : 7
+  Longest loss streak  : 7
+  Avg bars held        : 10.5
+  False breakout rate  : 53.8%
+  Retest success rate  : 9.3%
+
+  REJECTION REASONS:
+    MSS_REQUIRED_NOT_MET           : 114
+    NO_VALID_RANGE                 : 84
+    SHORT_BLOCKED_SWEEP_BSL_EQUAL_HIGHS : 74
+    SHORT_BLOCKED_SWEEP_BSL_RANGE_HIGH : 44
+    HTF_NOT_BULLISH                : 38
+    HTF_NOT_BEARISH                : 14
+    SHORT_BLOCKED_SWEEP_BSL_PDH    : 11
+
+  SESSION BREAKDOWN:
+    Category                 |     N |      WR |   Exp(R) |         Stat
+    ----------------------------------------------------------------
+    london                   |    24 |   70.8% |  +0.2981 | INSUFFICIENT
+    new_york                 |    15 |   60.0% |  +0.1125 | INSUFFICIENT
+
+  DIRECTION BREAKDOWN:
+    Category                 |     N |      WR |   Exp(R) |         Stat
+    ----------------------------------------------------------------
+    LONG                     |    13 |   61.5% |  +0.3345 | INSUFFICIENT
+    SHORT                    |    26 |   69.2% |  +0.1728 | INSUFFICIENT
+
+  ZONE TYPE BREAKDOWN:
+    Category                 |     N |      WR |   Exp(R) |         Stat
+    ----------------------------------------------------------------
+    BB                       |     6 |   33.3% |  -0.0973 | INSUFFICIENT
+    FVG                      |     2 |   50.0% |  -0.2600 | INSUFFICIENT
+    OB                       |    31 |   74.2% |  +0.3208 |           ok
+
+  STRUCTURE BREAK TYPE (MSS vs BOS):
+    Category                 |     N |      WR |   Exp(R) |         Stat
+    ----------------------------------------------------------------
+    MSS_BEARISH              |    26 |   69.2% |  +0.1728 | INSUFFICIENT
+    MSS_BULLISH              |    13 |   61.5% |  +0.3345 | INSUFFICIENT
+
+  SWEEP TYPE BREAKDOWN:
+    Category                 |     N |      WR |   Exp(R) |         Stat
+    ----------------------------------------------------------------
+    BSL_SESSION_HIGH         |     1 |  100.0% |  +0.4970 | INSUFFICIENT
+    BSL_SWING_HIGH           |    25 |   68.0% |  +0.1598 | INSUFFICIENT
+    SSL_EQUAL_LOWS           |     3 |  100.0% |  +1.3353 | INSUFFICIENT
+    SSL_PDL                  |     1 |    0.0% |  -1.0240 | INSUFFICIENT
+    SSL_RANGE_LOW            |     4 |   50.0% |  -0.2580 | INSUFFICIENT
+    SSL_SESSION_LOW          |     1 |    0.0% |  -1.0270 | INSUFFICIENT
+    SSL_SWING_LOW            |     4 |   75.0% |  +0.8562 | INSUFFICIENT
+
+  PARAMETER SNAPSHOT:
+    EXECUTION_TF                   = 5min
+    PIVOT_LEFT                     = 3
+    PIVOT_RIGHT                    = 3
+    RANGE_MIN_QUALITY              = 60
+    SWEEP_MIN_WICK_ATR             = 0.2
+    BREAKOUT_MIN_BODY_ATR          = 0.3
+    RETEST_TIMEOUT_BARS            = 50
+    SL_ATR_BUFFER                  = 0.5
+    TP_MIN_SCORE                   = 20
+    TP_MIN_RR                      = 1.0
+    MSS_REQUIRED                   = True
+    HIGHER_TF_FILTER_ON            = True
+
+======================================================================

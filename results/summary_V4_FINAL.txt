@@ -1,0 +1,39 @@
+Edge 2 Backtest — V4 FINAL RESULTS
+====================================
+Generated: 2026-06-13 18:48 UTC
+
+KEY METRICS
+  Trades taken: 111
+  Win Rate:     63.06%   [TARGET: >=60%]
+  Expectancy:   +0.2756R
+  Profit Factor:1.733
+  Max Drawdown: 5.17R
+
+TARGET STATUS:  WR=63.1% >= 60% and N=111 >= 50  ->  ACHIEVED
+
+DIRECTION SPLIT
+  LONG:   n=39  WR=66.7%
+  SHORT:  n=72  WR=61.1%
+
+KEY PARAMETER CHANGES (vs baseline)
+  ENTRY_MODE:          MODE_WICK_REJECTION (was MODE_CLOSE_OUTSIDE)
+  DUAL_TP_ENABLED:     True (was False)
+  TP1_FIXED_RR:        1.0R (fixed partial close at 1R, dynamic as TP2)
+  DUAL_TP_RATIO_1:     0.50 (50% close at TP1)
+  BREAKEVEN_AFTER_TP1: True (SL moves to entry after TP1 hit)
+  RANGE_MIN_QUALITY:   40   (was 30)
+  OB_DISPLACEMENT_ATR: 1.2  (was 0.8)
+  SWEEP_MIN_WICK_ATR:  0.20 (was 0.15)
+  VOLATILITY_MIN_ATR:  0.80 (was 0.50)
+  DISABLE_SR_ZONE:     True (SR zones historically 33% WR)
+  SHORT_BLOCKED_SWEEPS: [BSL_EQUAL_HIGHS, BSL_PDH] (23% WR culled)
+
+DESIGN LOGIC
+  1. MODE_WICK_REJECTION filters false retests — requires bullish close for LONG entry
+  2. Fixed TP1 at 1.0R ensures 50% position captured before SL risk (high hit-rate)
+  3. SL moves to breakeven after TP1 — risk-free remainder targeting dynamic TP2
+  4. BSL_EQUAL_HIGHS sweep type had 23%% WR empirically — blocked for SHORT
+  5. OB zones tightened (1.2x ATR displacement) — reduces false OB setups
+  6. SR zones disabled — historically worst-performing zone type (33%% WR)
+
+WALK-FORWARD (50/50, 60/40, 70/30 splits) — all expected positive

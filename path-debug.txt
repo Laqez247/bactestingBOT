@@ -1,0 +1,5 @@
+C:\Program Files\Git\mingw64\bin
+---CURRENT---
+c:\Users\user\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\user\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Program Files (x86)\Common Files\Intel\Shared Libraries\redist\intel64\compiler;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files (x86)\Intel\Intel(R) Management Engine Components\DAL;C:\Program Files\Intel\Intel(R) Management Engine Components\DAL;C:\Users\user\AppData\Local\Microsoft\WindowsApps;C:\Users\user\AppData\Local\Python\bin;C:\Users\user\AppData\Local\Programs\Antigravity IDE\bin;C:\Program Files\Git\cmd;C:\Program Files\Git\mingw64\bin
+GIT_EXISTS
+git version 2.54.0.windows.1
