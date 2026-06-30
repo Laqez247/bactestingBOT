@@ -82,10 +82,13 @@ def check(
         return None
 
     # --- Gate CS2-5: Session ---
+    # CS2_SESSION_FILTER overrides shared CS_SESSION_FILTER for CS2 specifically.
+    # Iter 5 data: NY = 7 trades at 28.6% WR, -0.5780R — structurally weak.
+    # London = 43T at 81.4% WR; off_hours = 19T at 73.7% WR — both viable.
     ts = df_exec.index[bar_i]
     session = _get_session(ts)
-    cs_sessions = cp("CS_SESSION_FILTER", ["london", "new_york"])
-    if session not in cs_sessions:
+    cs2_sessions = cp("CS2_SESSION_FILTER", cp("CS_SESSION_FILTER", ["london", "new_york"]))
+    if session not in cs2_sessions:
         return None
 
     atr_val = float(atr_exec.iloc[bar_i]) if not pd.isna(atr_exec.iloc[bar_i]) else 1.0
@@ -162,6 +165,27 @@ def check(
         return None  # don't fade a fresh bullish breakout
     if direction == "LONG" and mss_bearish:
         return None
+
+    # --- Gate CS2-MSS: Require recent MSS/BOS in trade direction ---
+    # Data: MSS_BEARISH 37T 81.1% WR +0.4878R, BOS_MACRO 9T 66.7% WR +0.2052R
+    # vs no-structure 38T 44.7% WR -0.2219R → gate removes net-negative cohort entirely
+    # mss_bearish_bar / bos_bearish_bar persist after flag consumption — use bar tracking.
+    if cp("CS2_MSS_REQUIRED", True):
+        mss_lookback = cp("CS2_MSS_LOOKBACK_BARS", 10)
+        allow_bos    = cp("CS2_ALLOW_BOS_AS_MSS", True)
+
+        if direction == "SHORT":
+            mss_bar = getattr(structure_engine, "mss_bearish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bearish_bar", -1)
+        else:
+            mss_bar = getattr(structure_engine, "mss_bullish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bullish_bar", -1)
+
+        mss_recent = mss_bar >= 0 and (bar_i - mss_bar) <= mss_lookback
+        bos_recent = allow_bos and bos_bar >= 0 and (bar_i - bos_bar) <= mss_lookback
+
+        if not mss_recent and not bos_recent:
+            return None  # No recent structural confirmation — fade is unanchored
 
     # --- Gate CS2-8: HTF trend alignment ---
     htf_trend = "RANGING"
