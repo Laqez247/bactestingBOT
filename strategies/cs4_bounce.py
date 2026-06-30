@@ -210,6 +210,27 @@ def check(
         if sweep_wick < mod_wick_threshold:
             return None
 
+    # --- Gate CS4-MSS: Require recent MSS/BOS structural confirmation ---
+    # Iter 7 data: MSS_BEARISH 42T 88.1% WR +0.627R; unknown 23T 65.2% WR -0.031R
+    # Counter-trend bounces without MSS/BOS anchor are unanchored and bleed expectancy.
+    # mss_bearish_bar / bos_bearish_bar persist after flag consumption — safe to use.
+    if cp("CS4_MSS_REQUIRED", True):
+        mss_lookback = cp("CS4_MSS_LOOKBACK_BARS", 10)
+        allow_bos    = cp("CS4_ALLOW_BOS_AS_MSS", True)
+
+        if direction == "SHORT":
+            mss_bar = getattr(structure_engine, "mss_bearish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bearish_bar", -1)
+        else:
+            mss_bar = getattr(structure_engine, "mss_bullish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bullish_bar", -1)
+
+        mss_recent = mss_bar >= 0 and (bar_i - mss_bar) <= mss_lookback
+        bos_recent = allow_bos and bos_bar >= 0 and (bar_i - bos_bar) <= mss_lookback
+
+        if not mss_recent and not bos_recent:
+            return None  # Counter-trend bounce without structural anchor — reject
+
     # --- Gate CS4-9: HTF counter-trend check ---
     htf_trend = "RANGING"
     if htf_aligned_series is not None and bar_i < len(htf_aligned_series):
