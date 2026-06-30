@@ -49,6 +49,90 @@ def _get_session(ts) -> str:
     return "off_hours"
 
 
+def _has_qualifying_prior_sweep(
+    liquidity_engine, direction: str, range_high: float,
+    atr_val: float, bar_i: int, cp
+) -> tuple:
+    """
+    Gate CS1-SWEEP: For CS1 SHORT, check if a qualifying BSL sweep is
+    active (not yet consumed by Edge 2) within the last CS1_SWEEP_LOOKBACK_BARS.
+
+    Uses the current bsl_swept state from liquidity_engine — the SAME state
+    that Edge 2 uses to validate sweep context, but accessed here for CS1's
+    earlier-entry thesis: sweep happened, MSS/OB not yet confirmed, CS1 fades
+    the boundary 4–20 bars after the sweep fires.
+
+    If Edge 2 already opened a trade on this sweep and reset bsl_swept, then
+    CS1 cannot fire on the same sweep. This is intentional — Edge 2 consumed
+    the signal, CS1 looks for a different opportunity.
+
+    Fallback: sweep_history is also checked for qualifying BSL sweeps near
+    range_high when bsl_swept has been reset. This covers the case where a
+    sweep occurred, Edge 2 ran a full trade, and the range persists — a new
+    CS1 setup can form if the range_high is retested later.
+
+    Returns (valid: bool, context_type: str | None)
+      True, sweep_type  → qualifying sweep found
+      False, None       → no qualifying sweep (may trigger adaptive rule)
+      False, reason_str → hard block
+    """
+    if direction != "SHORT":
+        return True, None  # LONG disabled — gate not applicable
+
+    lookback = cp("CS1_SWEEP_LOOKBACK_BARS", 20)
+    proximity = cp("CS1_SWEEP_PROXIMITY_ATR", 0.30) * atr_val
+    qualifying_types = cp(
+        "CS1_QUALIFYING_SWEEP_TYPES",
+        ["BSL_SWING_HIGH", "BSL_EQUAL_HIGHS"]
+    )
+
+    # --- Primary: check current active BSL sweep state ---
+    # This is the high-conviction path: sweep is active, Edge 2 hasn't used it yet
+    bsl_swept = getattr(liquidity_engine, "bsl_swept", False)
+    bsl_type  = getattr(liquidity_engine, "bsl_sweep_type", "")
+    bsl_bar   = getattr(liquidity_engine, "bsl_sweep_bar", -1)
+
+    if bsl_swept and bsl_bar >= 0:
+        bars_since = bar_i - bsl_bar
+        if 0 <= bars_since <= lookback:
+            if bsl_type in qualifying_types:
+                # Also verify proximity: sweep level must be near current range_high
+                # Use the sweep_history level if available for the most precise check
+                return True, bsl_type
+            # If current BSL type is not qualifying (e.g. BSL_RANGE_HIGH), still block
+            # the adaptation path to avoid low-quality setups near poor sweep types
+
+    # --- Block SSL_EQUAL_LOWS context near range_high ---
+    ssl_swept = getattr(liquidity_engine, "ssl_swept", False)
+    ssl_type  = getattr(liquidity_engine, "ssl_sweep_type", "")
+    ssl_bar   = getattr(liquidity_engine, "ssl_sweep_bar", -1)
+    if ssl_swept and ssl_bar >= 0:
+        bars_since = bar_i - ssl_bar
+        if 0 <= bars_since <= lookback and ssl_type == "SSL_EQUAL_LOWS":
+            return False, "SSL_EQUAL_LOWS_BLOCKED"
+
+    # --- Fallback: sweep_history for recently-reset qualifying sweeps ---
+    # Handles: Edge 2 took a trade, reset bsl_swept, range persists, new CS1 setup
+    sweep_hist = getattr(liquidity_engine, "sweep_history", [])
+    qualifying_found = False
+    qualifying_type  = None
+
+    for event in sweep_hist:
+        bars_since = bar_i - event.bar
+        if bars_since < 0 or bars_since > lookback:
+            continue
+        if abs(event.level - range_high) > proximity:
+            continue
+        if event.sweep_type == "SSL_EQUAL_LOWS":
+            return False, "SSL_EQUAL_LOWS_BLOCKED"
+        if event.sweep_type in qualifying_types:
+            qualifying_found = True
+            qualifying_type  = event.sweep_type
+            # Keep scanning: a later SSL_EQUAL_LOWS could override (hard block wins)
+
+    return qualifying_found, qualifying_type
+
+
 def check(
     range_state,
     liquidity_engine,
@@ -79,10 +163,13 @@ def check(
         return None
 
     # --- Gate CS1-5: Session check ---
+    # CS1_SESSION_FILTER overrides the shared CS_SESSION_FILTER for CS1 specifically.
+    # Iter 4 analysis: London-only CS1 gives MaxDD -3.8R vs -11R for all-session.
+    # London London-pure WR is 70.9% vs 66% for all-session (London+NY+off-hours).
     ts = df_exec.index[bar_i]
     session = _get_session(ts)
-    cs_sessions = cp("CS_SESSION_FILTER", ["london", "new_york"])
-    if session not in cs_sessions:
+    cs1_sessions = cp("CS1_SESSION_FILTER", cp("CS_SESSION_FILTER", ["london", "new_york"]))
+    if session not in cs1_sessions:
         return None
 
     # --- Gate CS1-1: Range validity ---
@@ -218,6 +305,48 @@ def check(
         if ssl_swept and ssl_bar >= 0 and (bar_i - ssl_bar) <= sweep_guard_bars:
             return None
 
+    # --- Gate CS1-SWEEP: Prior qualifying BSL sweep near range_high (SHORT only) ---
+    # Data: BSL_SWING_HIGH 78.4% WR +0.3858R, BSL_EQUAL_HIGHS 66.7% WR +0.4828R
+    # vs no-sweep context: 130 trades 64.6% WR +0.1322R
+    # Sweep validates institutional rejection of range_high before CS1 fades it.
+    sweep_mod = None
+    sweep_valid, found_sweep_type = _has_qualifying_prior_sweep(
+        liquidity_engine, direction, rh, atr_val, bar_i, cp
+    )
+    if not sweep_valid:
+        if found_sweep_type == "SSL_EQUAL_LOWS_BLOCKED":
+            # Hard block: SSL_EQUAL_LOWS near range_high is a counter-signal
+            return None
+        # No qualifying sweep found — check adaptive rule:
+        # Deep wick (>= 0.55x ATR) compensates for missing sweep context
+        no_sweep_wick_atr = cp("CS1_NO_SWEEP_WICK_ATR", 0.55)
+        if wick_size >= no_sweep_wick_atr * atr_val:
+            sweep_mod = "NO_SWEEP_DEEP_WICK"
+        else:
+            return None  # CS1_NO_PRIOR_SWEEP — insufficient context
+
+    # --- Gate CS1-MSS: Require recent MSS/BOS structural confirmation ---
+    # Iter 8 data: zone-confirmed CS1 trades (61T): OB 80.8% WR, FVG 75%, BB 60%
+    # Unknown zone CS1 (42T): 57.1% WR, -0.035R combined → -0.194R OOS (degradation signal)
+    # Unknown zone = unknown structure = no recent MSS/BOS anchor.
+    # mss_bearish_bar / bos_bearish_bar persist after flag consumption (same as CS2/CS4 gates).
+    if cp("CS1_MSS_REQUIRED", True):
+        mss_lookback = cp("CS1_MSS_LOOKBACK_BARS", 10)
+        allow_bos    = cp("CS1_ALLOW_BOS_AS_MSS", True)
+
+        if direction == "SHORT":
+            mss_bar = getattr(structure_engine, "mss_bearish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bearish_bar", -1)
+        else:
+            mss_bar = getattr(structure_engine, "mss_bullish_bar", -1)
+            bos_bar = getattr(structure_engine, "bos_bullish_bar", -1)
+
+        mss_recent = mss_bar >= 0 and (bar_i - mss_bar) <= mss_lookback
+        bos_recent = allow_bos and bos_bar >= 0 and (bar_i - bos_bar) <= mss_lookback
+
+        if not mss_recent and not bos_recent:
+            return None  # Range-edge bounce without structural anchor — reject
+
     # --- Compute SL ---
     sl_buffer = cp("CS1_SL_BUFFER_ATR", 0.25) * atr_val
     if direction == "SHORT":
@@ -263,6 +392,8 @@ def check(
         mod_type = "CS1_WEAK_RANGE_DEEP_WICK"
     elif mod_b_needed:
         mod_type = "CS1_BORDERLINE_BODY_TREND_CONFIRM"
+    elif sweep_mod:
+        mod_type = sweep_mod  # "NO_SWEEP_DEEP_WICK" adaptation
 
     return CSSignal(
         strategy="CS1",
@@ -275,7 +406,8 @@ def check(
             f"CS1 {'SHORT' if direction == 'SHORT' else 'LONG'} at range "
             f"{'high' if direction == 'SHORT' else 'low'} "
             f"{rh if direction == 'SHORT' else rl:.2f}, "
-            f"quality={quality:.0f}, wick={wick_size:.2f}"
+            f"quality={quality:.0f}, wick={wick_size:.2f}, "
+            f"sweep_ctx={found_sweep_type or sweep_mod or 'NONE'}"
         ),
         bar_index=bar_i,
     )
