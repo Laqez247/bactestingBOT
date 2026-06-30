@@ -334,7 +334,7 @@ CS_SESSION_FILTER = ["london", "new_york"]
 
 # --- CS1: Range Edge Scalp ---
 CS1_ENABLED              = True
-CS1_MIN_RANGE_QUALITY    = 55      # min range quality for CS1 (above fallback, below Edge2)
+CS1_MIN_RANGE_QUALITY    = 65      # min range quality for CS1 — raised Iter 4D: 55→65
 CS1_MOD_QUALITY_FLOOR    = 45      # MOD-A: allow quality 45-54 with deeper wick
 CS1_BAND_ATR             = 0.20    # proximity band to range boundary (ATR fraction)
 CS1_SL_BUFFER_ATR        = 0.25    # SL buffer beyond range boundary (ATR fraction)
@@ -344,10 +344,36 @@ CS1_MIN_WICK_ATR         = 0.35    # hard gate: rejection wick must be >= 0.35×
 CS1_MOD_WICK_ATR         = 0.50    # MOD-A: wick threshold tightens to 0.50×ATR for weak ranges
 CS1_MIN_WICK_BODY_RATIO  = 0.50    # wick must be >= 50% of candle body for rejection
 CS1_ALLOW_LONG           = False   # LONG disabled: range_low breakdowns in XAUUSD are more often genuine
+# ITER 4 — CS1-SWEEP gate: require prior BSL sweep near range_high
+# Data source: BSL_SWING_HIGH 37t 78.4% WR +0.3858R, BSL_EQUAL_HIGHS 9t 66.7% WR +0.4828R
+# vs no-sweep: 130t 64.6% WR +0.1322R. SSL_EQUAL_LOWS hard-blocked (40% WR -0.42R).
+CS1_SWEEP_LOOKBACK_BARS    = 20    # bars to look back for prior sweep
+CS1_SWEEP_PROXIMITY_ATR    = 0.30  # how close sweep level must be to range_high (ATR fraction)
+CS1_QUALIFYING_SWEEP_TYPES = ["BSL_SWING_HIGH", "BSL_EQUAL_HIGHS"]  # BSL_RANGE_HIGH excluded (0.0573R too weak)
+CS1_NO_SWEEP_WICK_ATR      = 0.65  # adaptive: deep wick compensates for missing sweep (raised Iter4D: 0.55→0.65)
+# ITER 4 — Session restriction (CS1-specific, independent of shared CS_SESSION_FILTER)
+# London-only CS1: MaxDD -3.8R vs -11R all-session, WR 70.9% vs 66-68% — decisive win
+# CS2/CS3 still use CS_SESSION_FILTER = ["london", "new_york"]
+CS1_SESSION_FILTER         = ["london"]   # CS1 London-only (set Iter 4D)
+# ITER 8 — CS1-MSS gate: require recent MSS/BOS anchor (same pattern as CS2/CS4)
+# Data: CS1 unknown zone (42T) = 57.1% WR -0.035R combined, -0.194R OOS → degradation signal
+# Zone-confirmed CS1 (61T): OB 80.8%, FVG 75%, BB 60% — structurally clean
+CS1_MSS_REQUIRED           = True    # Gate CS1-MSS (Iter 8)
+CS1_MSS_LOOKBACK_BARS      = 10      # bars to look back for recent MSS/BOS
+CS1_ALLOW_BOS_AS_MSS       = True    # BOS_MACRO counts as structural confirmation
 
 # --- CS2: Round Number Fade ---
 CS2_ENABLED              = True
 CS2_INCREMENT            = 50.0    # $50 round number spacing
+# ITER 5 — CS2-MSS gate: require recent MSS/BOS structure confirmation
+# Data: MSS_BEARISH 37T 81.1% WR +0.4878R; BOS_MACRO 9T 66.7% WR +0.2052R
+# vs no-structure 38T 44.7% WR -0.2219R → gate eliminates net-negative cohort
+CS2_MSS_REQUIRED         = True    # Gate CS2-MSS enabled (Iter 5)
+CS2_MSS_LOOKBACK_BARS    = 10      # bars to look back for recent MSS/BOS
+CS2_ALLOW_BOS_AS_MSS     = True    # allow BOS_MACRO_DISPLACEMENT as structure confirmation
+# ITER 5 — Session restriction: block NY for CS2 (7T at 28.6% WR -0.578R)
+# London=43T 81.4% WR; off_hours=19T 73.7% WR — both viable for round number fade
+CS2_SESSION_FILTER       = ["london", "off_hours"]   # CS2 NO NY (set Iter 5)
 CS2_MAJOR_INCREMENT      = 100.0   # $100 = major level, higher psychological weight
 CS2_ROUND_BAND_ABS       = 2.50    # within $2.50 of a round number qualifies
 CS2_MIN_CLOSE_DISTANCE   = 1.00    # close must be at least $1 away from the level
@@ -374,9 +400,12 @@ CS3_MOD_B_BODY_ATR       = 0.55    # MOD-B: stricter body threshold when RANGING
 
 # --- CS4: Oversold/Overbought Structural Bounce ---
 CS4_ENABLED              = True
-CS4_RSI_OVERSOLD         = 32      # HTF RSI threshold for LONG bounce context
-CS4_RSI_OVERBOUGHT       = 68      # HTF RSI threshold for SHORT bounce context
-CS4_RSI_EXTREME_OVERRIDE = 28      # stricter threshold required for counter-HTF-trend
+# ITER 7 — RSI gate tightened from 32/68 → 30/70 (fewer but higher-quality bounces)
+# Data: MSS_BEARISH 42T 88.1% WR; unknown 23T 65.2% WR -0.031R removed by MSS gate
+# Tighter RSI also reduces MOD-A (32→36 zone) from 4-bar window to 2-bar (30→32)
+CS4_RSI_OVERSOLD         = 30      # HTF RSI threshold for LONG bounce (was 32, Iter 7)
+CS4_RSI_OVERBOUGHT       = 70      # HTF RSI threshold for SHORT bounce (was 68, Iter 7)
+CS4_RSI_EXTREME_OVERRIDE = 26      # stricter threshold for counter-HTF-trend (was 28)
 CS4_SWEEP_LOOKBACK_BARS  = 8       # bars to look back for qualifying boundary sweep
 CS4_MOD_SWEEP_LOOKBACK   = 15      # MOD-B: extended lookback when RSI moved deeper
 CS4_PROXIMITY_ATR        = 0.25    # price must be within X ATR of range boundary
@@ -384,7 +413,13 @@ CS4_SL_BUFFER_ATR        = 0.25    # SL buffer beyond the sweep low/high
 CS4_TP_MIN_SCORE         = 30      # higher bar — counter-trend trade needs strong target
 CS4_TP_MIN_RR            = 1.5     # must have wider RR to justify counter-trend risk
 CS4_MOD_WICK_THRESHOLD   = 0.60    # MOD-A: deep wick ATR fraction to compensate weak RSI
-CS4_MOD_A_RSI_FLOOR      = 36      # MOD-A: RSI floor for oversold (above threshold but close)
+CS4_MOD_A_RSI_FLOOR      = 34      # MOD-A: RSI floor for oversold (was 36, tightened Iter 7)
+# ITER 7 — CS4-MSS gate: require recent MSS/BOS for counter-trend bounce anchor
+# Data: MSS_BEARISH 42T 88.1% WR +0.627R; unknown 23T 65.2% WR -0.031R
+# Same bar-persistence approach as CS2 MSS gate (mss_bearish_bar / bos_bearish_bar)
+CS4_MSS_REQUIRED         = True    # Gate CS4-MSS enabled (Iter 7)
+CS4_MSS_LOOKBACK_BARS    = 10      # bars to look back for recent MSS/BOS
+CS4_ALLOW_BOS_AS_MSS     = True    # allow BOS_MACRO as structural confirmation
 CS4_MOD_A_RSI_CEIL       = 64      # MOD-A: RSI ceil for overbought (below threshold but close)
 CS4_MIN_RANGE_QUALITY    = 45      # CS4 range quality floor (lower than CS1 — RSI compensates)
 CS4_SESSION_FILTER       = ["london"]   # London-only: NY RSI bounces fail (US equity momentum continues)
